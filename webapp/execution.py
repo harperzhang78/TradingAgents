@@ -17,6 +17,8 @@ from typing import Any
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide
 from alpaca.trading.requests import (
+    GetOrderByIdRequest,
+    GetOrdersRequest,
     LimitOrderRequest,
     MarketOrderRequest,
     StopLossRequest,
@@ -115,21 +117,31 @@ def get_alpaca_portfolio_context(client: TradingClient | None = None):
 
 
 def fetch_last_close_price(ticker: str) -> float | None:
-    """Fetch last close price from Alpaca data API for reference/sizing (best effort)."""
+    """Fetch latest trade/close price from Alpaca data API for reference/sizing (best effort)."""
     api_key, secret_key, _ = get_alpaca_credentials()
     if not api_key or not secret_key:
         return None
     try:
-        from alpaca.data.requests import StockBarsRequest
-        from alpaca.data.timeframe import Timeframe
-        import alpaca.data
-        hist_client = alpaca.data.StockBarsClient(api_key, secret_key)
-        req = StockBarsRequest(symbol_or_symbols=ticker, timeframe=Timeframe.Day, limit=1)
-        resp = hist_client.get_stock_bars(req)
-        if resp and resp[0] and resp[0].data:
-            return float(resp[0].data[-1]["close"])
+        from alpaca.data import StockHistoricalDataClient
+        from alpaca.data.requests import StockLatestTradeRequest
+
+        sym = ticker.strip().upper()
+        client = StockHistoricalDataClient(api_key, secret_key)
+        resp = client.get_stock_latest_trade(StockLatestTradeRequest(symbol_or_symbols=sym))
+        trade = None
+        if resp and sym in resp:
+            trade = resp[sym]
+        elif resp and ticker in resp:
+            trade = resp[ticker]
+
+        if trade is not None:
+            price = getattr(trade, "price", None)
+            if price is None and isinstance(trade, dict):
+                price = trade.get("price")
+            if price is not None:
+                return float(price)
     except Exception as e:
-        logger.debug("Skipped price lookup for %s: %s", ticker, e)
+        logger.warning("Skipped price lookup for %s: %s", ticker, e)
     return None
 
 
@@ -223,7 +235,8 @@ def build_order(
     Keys in the returned dict:
       symbol, side ('buy'|'sell'), otype ('market'|'limit'),
       limit_price (float, for limit), notional (float, for market),
-      qty (int, for limit), stop_price (float, optional)
+      qty (int, for limit), stop_price (float, optional),
+      take_profit_price (float, optional)
     """
     action = (decision.get("action") or "").upper()
     rating = (decision.get("rating") or "").upper()
@@ -248,13 +261,17 @@ def build_order(
     # Sizing (default 5% of equity when the trader gave no parseable hint)
     notional = parse_position_sizing(decision.get("position_sizing"), account_equity)
 
-    # Price: prefer the trader's entry price, fall back to current market
-    ref_price = decision.get("entry_price") or current_price
+    # Fetch market price if not provided
+    if current_price is None:
+        current_price = fetch_last_close_price(ticker)
+
+    llm_entry = decision.get("entry_price")
     stop_price = decision.get("stop_loss")
     take_profit = decision.get("price_target")
 
-    # --- MARKET order (no reference price available) ---
-    if ref_price is None:
+    # If current market price is unavailable (API failure), fall back to market order
+    if current_price is None:
+        logger.warning("⚠️ Current market price unavailable for %s — using market order", ticker)
         return {
             "symbol": ticker,
             "side": direction,
@@ -266,7 +283,114 @@ def build_order(
             "take_profit_price": None,
         }
 
-    # --- LIMIT order (we have a reference price) ---
+    # If no LLM entry price was provided, fall back to market order
+    if llm_entry is None:
+        return {
+            "symbol": ticker,
+            "side": direction,
+            "otype": "market",
+            "notional": round(notional, 2) if notional else None,
+            "limit_price": None,
+            "qty": None,
+            "stop_price": None,
+            "take_profit_price": None,
+        }
+
+    # Validate LLM entry price against current_price:
+    # If deviation > 25%, treat LLM price as unreliable -> fallback to MARKET order
+    deviation = abs(llm_entry - current_price) / current_price
+    if deviation > 0.25:
+        msg = f"⚠️ LLM entry price ${llm_entry:.2f} deviates >25% from market ${current_price:.2f} — using market order"
+        logger.warning(msg)
+        print(msg)
+        return {
+            "symbol": ticker,
+            "side": direction,
+            "otype": "market",
+            "notional": round(notional, 2) if notional else None,
+            "limit_price": None,
+            "qty": None,
+            "stop_price": None,
+            "take_profit_price": None,
+        }
+
+    # LLM price is within 25% of current_price -> LIMIT order with LLM price
+    ref_price = llm_entry
+
+    # Validate stop_loss and price_target consistency relative to ref_price
+    if direction == "buy":
+        # Check if stop and target were swapped by LLM
+        if (
+            stop_price is not None
+            and take_profit is not None
+            and stop_price > ref_price
+            and take_profit < ref_price
+        ):
+            logger.warning(
+                "⚠️ LLM swapped stop_loss ($%.2f) and price_target ($%.2f) for buy — swapping back",
+                stop_price,
+                take_profit,
+            )
+            stop_price, take_profit = take_profit, stop_price
+
+        # For buy, stop_loss must be below entry price
+        if stop_price is not None and (stop_price >= ref_price or stop_price <= 0):
+            old_stop = stop_price
+            stop_price = round(ref_price * 0.93, 2)
+            logger.warning(
+                "⚠️ LLM stop_loss $%.2f inconsistent with buy entry $%.2f — adjusted to $%.2f",
+                old_stop,
+                ref_price,
+                stop_price,
+            )
+
+        # For buy, price_target must be above entry price
+        if take_profit is not None and take_profit <= ref_price:
+            old_tp = take_profit
+            take_profit = round(ref_price * 1.20, 2)
+            logger.warning(
+                "⚠️ LLM price_target $%.2f inconsistent with buy entry $%.2f — adjusted to $%.2f",
+                old_tp,
+                ref_price,
+                take_profit,
+            )
+    else:  # sell
+        # Check if stop and target were swapped by LLM
+        if (
+            stop_price is not None
+            and take_profit is not None
+            and stop_price < ref_price
+            and take_profit > ref_price
+        ):
+            logger.warning(
+                "⚠️ LLM swapped stop_loss ($%.2f) and price_target ($%.2f) for sell — swapping back",
+                stop_price,
+                take_profit,
+            )
+            stop_price, take_profit = take_profit, stop_price
+
+        # For sell, stop_loss must be above entry price
+        if stop_price is not None and stop_price <= ref_price:
+            old_stop = stop_price
+            stop_price = round(ref_price * 1.07, 2)
+            logger.warning(
+                "⚠️ LLM stop_loss $%.2f inconsistent with sell entry $%.2f — adjusted to $%.2f",
+                old_stop,
+                ref_price,
+                stop_price,
+            )
+
+        # For sell, price_target must be below entry price
+        if take_profit is not None and (take_profit >= ref_price or take_profit <= 0):
+            old_tp = take_profit
+            take_profit = round(ref_price * 0.80, 2)
+            logger.warning(
+                "⚠️ LLM price_target $%.2f inconsistent with sell entry $%.2f — adjusted to $%.2f",
+                old_tp,
+                ref_price,
+                take_profit,
+            )
+
     qty = max(1, int(notional / ref_price)) if (notional and ref_price > 0) else 1
     return {
         "symbol": ticker,
@@ -333,6 +457,130 @@ def submit_alpaca_order(order: dict, client: TradingClient | None = None) -> dic
         "side": str(placed.side),
         "order_type": str(placed.order_type),
     }
+
+
+# ---------------------------------------------------------------------------
+# Active Orders Management (Alpaca Live Orders)
+# ---------------------------------------------------------------------------
+
+def _format_order(o: Any) -> dict[str, Any]:
+    """Format an Alpaca Order object into a standard dictionary."""
+    side_val = getattr(o, "side", None)
+    if hasattr(side_val, "value"):
+        side_val = side_val.value
+    status_val = getattr(o, "status", None)
+    if hasattr(status_val, "value"):
+        status_val = status_val.value
+    order_class_val = getattr(o, "order_class", None)
+    if hasattr(order_class_val, "value"):
+        order_class_val = order_class_val.value
+    order_type_val = getattr(o, "order_type", None)
+    if hasattr(order_type_val, "value"):
+        order_type_val = order_type_val.value
+    tif_val = getattr(o, "time_in_force", None)
+    if hasattr(tif_val, "value"):
+        tif_val = tif_val.value
+
+    limit_price = (
+        float(str(o.limit_price))
+        if getattr(o, "limit_price", None) is not None
+        else None
+    )
+    stop_price = (
+        float(str(o.stop_price))
+        if getattr(o, "stop_price", None) is not None
+        else None
+    )
+    take_profit = None
+    if getattr(o, "take_profit_price", None) is not None:
+        take_profit = float(str(o.take_profit_price))
+    elif getattr(o, "take_profit", None) is not None:
+        tp = o.take_profit
+        take_profit = float(str(getattr(tp, "limit_price", tp)))
+
+    # If stop or take_profit not on parent, extract from child legs (e.g. bracket orders)
+    legs = getattr(o, "legs", None)
+    if legs and isinstance(legs, list):
+        for leg in legs:
+            leg_type = str(
+                getattr(leg, "order_type", None)
+                or (leg.get("order_type") if isinstance(leg, dict) else "")
+            ).lower()
+            leg_stop = getattr(leg, "stop_price", None) or (
+                leg.get("stop_price") if isinstance(leg, dict) else None
+            )
+            leg_limit = getattr(leg, "limit_price", None) or (
+                leg.get("limit_price") if isinstance(leg, dict) else None
+            )
+            if leg_stop is not None and stop_price is None:
+                stop_price = float(str(leg_stop))
+            if "limit" in leg_type and leg_limit is not None and take_profit is None:
+                take_profit = float(str(leg_limit))
+
+    created_at = (
+        o.created_at.isoformat()
+        if hasattr(getattr(o, "created_at", None), "isoformat")
+        else str(o.created_at)
+        if getattr(o, "created_at", None)
+        else None
+    )
+
+    return {
+        "id": str(o.id),
+        "symbol": str(o.symbol),
+        "side": str(side_val).lower() if side_val else None,
+        "qty": float(str(o.qty)) if getattr(o, "qty", None) is not None else None,
+        "filled_qty": float(str(o.filled_qty)) if getattr(o, "filled_qty", None) is not None else 0.0,
+        "limit_price": limit_price,
+        "stop_price": stop_price,
+        "take_profit": take_profit,
+        "status": str(status_val).lower() if status_val else None,
+        "created_at": created_at,
+        "time_in_force": str(tif_val).lower() if tif_val else None,
+        "order_class": str(order_class_val).lower() if order_class_val else None,
+        "order_type": str(order_type_val).lower() if order_type_val else None,
+        "client_order_id": getattr(o, "client_order_id", None),
+    }
+
+
+def get_live_orders(client: TradingClient | None = None) -> list[dict[str, Any]]:
+    """Fetch all open/pending orders from Alpaca.
+
+    Uses GetOrdersRequest(status='open') — in alpaca-py v0.44 the status param
+    accepts 'open', 'closed', or 'all' (string values, NOT OrderStatus enums).
+    """
+    if client is None:
+        client = get_alpaca_trading_client()
+
+    req = GetOrdersRequest(status="open", nested=True)
+    orders = client.get_orders(req)
+    return [_format_order(o) for o in orders]
+
+
+def get_live_order(order_id: str, client: TradingClient | None = None) -> dict[str, Any] | None:
+    """Fetch a single order by its Alpaca order ID."""
+    if client is None:
+        client = get_alpaca_trading_client()
+    try:
+        order = client.get_order_by_id(order_id, filter=GetOrderByIdRequest(nested=True))
+        return _format_order(order)
+    except Exception as e:
+        logger.warning("Could not fetch Alpaca order %s: %s", order_id, e)
+        return None
+
+
+def cancel_live_order(order_id: str, client: TradingClient | None = None) -> bool:
+    """Cancel an open order by its Alpaca order ID."""
+    if client is None:
+        client = get_alpaca_trading_client()
+
+    if hasattr(client, "cancel_order_by_id"):
+        client.cancel_order_by_id(order_id)
+    elif hasattr(client, "cancel_order"):
+        client.cancel_order(order_id)
+    else:
+        raise AttributeError("TradingClient has no order cancel method")
+    return True
 
 
 # ---------------------------------------------------------------------------

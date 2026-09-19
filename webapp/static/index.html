@@ -147,6 +147,41 @@
             </div>
           </div>
         </div>
+
+        <!-- Active Orders Card -->
+        <div class="card mt-4" id="active-orders-card">
+          <div class="card-header">
+            <div class="card-title">
+              <span>📋 Active Orders</span>
+              <span class="badge" id="orders-badge">0 active</span>
+            </div>
+            <button id="btn-refresh-orders" class="btn btn-secondary btn-sm" title="Refresh active orders">
+              🔄 Refresh
+            </button>
+          </div>
+          <div class="card-body">
+            <div class="table-responsive">
+              <table class="data-table" id="orders-table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Side</th>
+                    <th>Qty</th>
+                    <th>Limit</th>
+                    <th>Stop</th>
+                    <th>Target</th>
+                    <th>Status</th>
+                    <th>Placed</th>
+                    <th class="text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="orders-tbody">
+                  <tr><td colspan="9" class="text-center py-4 text-muted">Loading active orders...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- Right Column: Recent Runs & Recommendations -->

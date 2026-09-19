@@ -5,6 +5,7 @@
 const state = {
   account: null,
   watchlist: [],
+  liveOrders: [],
   settings: {
     auto_trade: false,
     schedule_enabled: false,
@@ -127,10 +128,23 @@ async function fetchRuns() {
   } catch (err) {
     console.error('Runs fetch error:', err);
   }
+async function fetchLiveOrders() {
+  try {
+    state.liveOrders = await api('/api/orders/live');
+    renderLiveOrders();
+  } catch (err) {
+    console.warn('Live orders fetch warning:', err);
+  }
 }
 
 async function refreshAll() {
-  await Promise.all([fetchAccount(), fetchSettings(), fetchWatchlist(), fetchRuns()]);
+  await Promise.all([
+    fetchAccount(),
+    fetchSettings(),
+    fetchWatchlist(),
+    fetchRuns(),
+    fetchLiveOrders(),
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +194,72 @@ function renderAccount() {
         <td>${formatCurrency(p.market_value)}</td>
         <td class="${plClass}">
           ${formatCurrency(p.unrealized_pl)} (${formatPercent(p.unrealized_plpc)})
+        </td>
+      </tr>
+    `;
+    })
+    .join('');
+}
+
+function renderLiveOrders() {
+  const orders = state.liveOrders || [];
+  const tbody = document.getElementById('orders-tbody');
+  const badge = document.getElementById('orders-badge');
+
+  if (!tbody) return;
+  if (badge) badge.textContent = `${orders.length} active`;
+
+  if (orders.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="9" class="text-center py-4 text-muted">Flat — no active orders.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = orders
+    .map((o) => {
+      // Determine order type tag
+      const oclass = (o.order_class || '').toLowerCase();
+      const otypeRaw = (o.order_type || 'limit').toLowerCase();
+      let otype = (oclass === 'bracket' ? 'BRACKET' : otypeRaw).toUpperCase();
+      let tagClass = 'limit';
+      if (oclass === 'bracket') tagClass = 'bracket';
+      else if (otypeRaw === 'market') tagClass = 'market';
+      else if (otypeRaw.includes('stop')) tagClass = 'stop';
+
+      const sideUpper = (o.side || 'BUY').toUpperCase();
+      const sideBadgeClass = sideUpper === 'BUY' ? 'badge-buy' : 'badge-sell';
+
+      // Status badge with distinct styling for pending_new vs new
+      const statusLower = (o.status || '').toLowerCase();
+      let statusBadge = `<span class="badge">${(o.status || 'NEW').toUpperCase()}</span>`;
+      if (statusLower === 'pending_new') {
+        statusBadge = `<span class="badge badge-status-pending-new">PENDING NEW</span>`;
+      } else if (statusLower === 'new') {
+        statusBadge = `<span class="badge badge-status-new">NEW</span>`;
+      }
+
+      const limitStr = o.limit_price !== null && o.limit_price !== undefined ? formatCurrency(o.limit_price) : '-';
+      const stopStr = o.stop_price !== null && o.stop_price !== undefined ? formatCurrency(o.stop_price) : '-';
+      const targetStr = o.take_profit !== null && o.take_profit !== undefined ? formatCurrency(o.take_profit) : '-';
+      const qtyStr = o.qty !== null && o.qty !== undefined ? o.qty : '-';
+      const placedStr = formatDate(o.created_at);
+
+      return `
+      <tr>
+        <td class="symbol-cell">
+          ${o.symbol}
+          <span class="badge-tag badge-tag-${tagClass}">${otype}</span>
+        </td>
+        <td><span class="badge ${sideBadgeClass}">${sideUpper}</span></td>
+        <td>${qtyStr}</td>
+        <td>${limitStr}</td>
+        <td>${stopStr}</td>
+        <td>${targetStr}</td>
+        <td>${statusBadge}</td>
+        <td class="text-xs text-muted">${placedStr}</td>
+        <td class="text-right">
+          <button class="btn btn-danger btn-sm" onclick="cancelLiveOrder('${o.id}')" title="Cancel order">
+            Cancel
+          </button>
         </td>
       </tr>
     `;
@@ -518,6 +598,21 @@ async function toggleWatchlistEnabled(symbol, enabled) {
   }
 }
 
+async function cancelLiveOrder(orderId) {
+  if (!confirm('Are you sure you want to cancel this order?')) return;
+  try {
+    await api(`/api/orders/live/${orderId}/cancel`, { method: 'POST' });
+    showToast('Order cancellation submitted', 'success');
+    await fetchLiveOrders();
+    setTimeout(async () => {
+      await fetchLiveOrders();
+      await fetchAccount();
+    }, 600);
+  } catch (err) {
+    showToast(`Failed to cancel order: ${err.message}`, 'error');
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Log Viewer Modal
 // ---------------------------------------------------------------------------
@@ -678,12 +773,26 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('modal-close').addEventListener('click', closeLogsModal);
   document.getElementById('modal-btn-close').addEventListener('click', closeLogsModal);
 
+  // Refresh active orders button
+  const btnRefreshOrders = document.getElementById('btn-refresh-orders');
+  if (btnRefreshOrders) {
+    btnRefreshOrders.addEventListener('click', async () => {
+      await fetchLiveOrders();
+      showToast('Active orders refreshed', 'info');
+    });
+  }
+
   // Initial load
   refreshAll();
 
-  // Background polling every 8 seconds
+  // Background polling every 8 seconds for runs & account
   setInterval(() => {
     fetchRuns();
     fetchAccount();
   }, 8000);
+
+  // Background polling every 30 seconds for live orders
+  setInterval(() => {
+    fetchLiveOrders();
+  }, 30000);
 });

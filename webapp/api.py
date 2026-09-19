@@ -19,7 +19,12 @@ from webapp.db import (
     set_setting,
     update_watchlist_item,
 )
-from webapp.execution import get_account_overview
+from webapp.execution import (
+    cancel_live_order,
+    get_account_overview,
+    get_live_order,
+    get_live_orders,
+)
 from webapp.runner import runner
 
 logger = logging.getLogger(__name__)
@@ -247,3 +252,49 @@ def list_orders(
     ticker: str | None = None,
 ) -> list[dict[str, Any]]:
     return get_orders(limit=limit, ticker=ticker)
+
+
+# ---------------------------------------------------------------------------
+# Alpaca Live Active Orders
+# ---------------------------------------------------------------------------
+
+@router.get("/orders/live")
+def list_live_orders() -> list[dict[str, Any]]:
+    """Fetch open/pending orders directly from Alpaca."""
+    try:
+        return get_live_orders()
+    except Exception as e:
+        logger.error("Failed to fetch live orders from Alpaca: %s", e)
+        raise HTTPException(status_code=503, detail=f"Alpaca service unavailable: {e}")
+
+
+@router.get("/orders/live/{order_id}")
+def get_single_live_order(order_id: str) -> dict[str, Any]:
+    """Retrieve a single live order from Alpaca by order ID."""
+    try:
+        order = get_live_order(order_id)
+        if not order:
+            raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+        return order
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to fetch live order %s from Alpaca: %s", order_id, e)
+        raise HTTPException(status_code=503, detail=f"Alpaca service unavailable: {e}")
+
+
+@router.post("/orders/live/{order_id}/cancel")
+def cancel_live_order_post(order_id: str) -> dict[str, Any]:
+    """Cancel an active order on Alpaca."""
+    try:
+        cancel_live_order(order_id)
+        return {"success": True, "order_id": order_id, "message": "Order cancellation submitted"}
+    except Exception as e:
+        logger.error("Failed to cancel live order %s on Alpaca: %s", order_id, e)
+        raise HTTPException(status_code=503, detail=f"Failed to cancel order: {e}")
+
+
+@router.delete("/orders/live/{order_id}")
+def cancel_live_order_delete(order_id: str) -> dict[str, Any]:
+    """Cancel an active order on Alpaca (DELETE alias)."""
+    return cancel_live_order_post(order_id)
