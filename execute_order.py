@@ -25,12 +25,14 @@ if str(PROJECT_ROOT) not in sys.path:
 # Shared execution logic implemented in webapp.execution
 from webapp.execution import (
     build_order,
+    cancel_live_order,
     execute,
     fetch_last_close_price,
     get_account_overview,
     get_alpaca_credentials,
     get_alpaca_portfolio_context,
     get_alpaca_trading_client,
+    get_live_orders,
     main,
     parse_position_sizing,
     parse_trader_decision,
@@ -49,6 +51,8 @@ __all__ = [
     "get_alpaca_portfolio_context",
     "fetch_last_close_price",
     "submit_alpaca_order",
+    "get_live_orders",
+    "cancel_live_order",
 ]
 
 if __name__ == "__main__":

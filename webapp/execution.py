@@ -574,11 +574,15 @@ def cancel_live_order(order_id: str, client: TradingClient | None = None) -> boo
     if client is None:
         client = get_alpaca_trading_client()
 
+    called = False
     if hasattr(client, "cancel_order_by_id"):
         client.cancel_order_by_id(order_id)
-    elif hasattr(client, "cancel_order"):
+        called = True
+    if hasattr(client, "cancel_order") and type(client) is not TradingClient:
         client.cancel_order(order_id)
-    else:
+        called = True
+
+    if not called:
         raise AttributeError("TradingClient has no order cancel method")
     return True
 

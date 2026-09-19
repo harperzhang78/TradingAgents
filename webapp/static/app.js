@@ -128,6 +128,8 @@ async function fetchRuns() {
   } catch (err) {
     console.error('Runs fetch error:', err);
   }
+}
+
 async function fetchLiveOrders() {
   try {
     state.liveOrders = await api('/api/orders/live');
