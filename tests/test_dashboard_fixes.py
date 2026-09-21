@@ -567,3 +567,262 @@ def test_failed_step_does_not_show_faked_verdict():
     assert "503 UNAVAILABLE" in s4["key_find"]
     assert s4["key_find"].startswith("\u274c No output")
     assert s4.get("error") == "503 UNAVAILABLE. This model is currently experiencing high demand."
+
+
+# ============================================================================
+# Progressive Summary in-progress tests (SPEC_progressive_summary.md)
+# ============================================================================
+
+
+def test_progressive_summary_running_no_calls():
+    """A run with status='running' and NO calls:
+    - Step 1 is 'active' (with an in-progress placeholder).
+    - Steps 2-5 are 'pending' with empty key_find (no fabricated fallback findings).
+    """
+    run = {
+        "id": "run-prog-no-calls",
+        "ticker": "AAPL",
+        "status": "running",
+    }
+    summary = summarize_run(run, llm_calls=[])
+    assert summary["overall"] == "ANALYSIS IN PROGRESS for AAPL"
+
+    steps = summary["steps"]
+    assert len(steps) == 5
+
+    # Step 1 is the initial active step
+    assert steps[0]["n"] == 1
+    assert steps[0]["state"] == "active"
+    assert "In progress" in steps[0]["key_find"]
+
+    # Steps 2-5 must be pending with empty key_find
+    for s in steps[1:]:
+        assert s["state"] == "pending"
+        assert s["key_find"] == ""
+        # Must never show fabricated fallback findings
+        assert "Debated growth catalysts" not in s["key_find"]
+        assert "PM decision" not in s["key_find"]
+        assert "No order submitted" not in s["key_find"]
+        assert "No new position initiated" not in s["key_find"]
+
+
+def test_progressive_summary_running_only_step_1_calls():
+    """A run with status='running' and only step-1 calls:
+    - Step 1 is reached and 'active', displaying its real key finding.
+    - Steps 2-5 are 'pending' with empty key_find and no fabricated findings.
+    """
+    run = {
+        "id": "run-prog-step-1",
+        "ticker": "MSFT",
+        "status": "running",
+    }
+    llm_calls = [
+        {
+            "seq": 1,
+            "node": "Market Analyst",
+            "kind": "llm",
+            "ok": True,
+            "response": "Strong breakout pattern above 200-day moving average.",
+            "ts": "2026-09-21T10:00:00Z",
+        },
+        {
+            "seq": 2,
+            "node": "Sentiment Analyst",
+            "kind": "llm",
+            "ok": True,
+            "response": {"band": "Bullish", "score": 8.5},
+            "ts": "2026-09-21T10:01:00Z",
+        },
+    ]
+
+    summary = summarize_run(run, llm_calls=llm_calls)
+    steps = summary["steps"]
+    assert len(steps) == 5
+
+    # Step 1 is active and has real findings
+    assert steps[0]["n"] == 1
+    assert steps[0]["state"] == "active"
+    assert "Sentiment: Bullish (8.5/10)" in steps[0]["key_find"]
+    assert "Strong breakout pattern" in steps[0]["key_find"]
+
+    # Steps 2-5 must be pending with empty key_find
+    for s in steps[1:]:
+        assert s["state"] == "pending"
+        assert s["key_find"] == ""
+        assert "Debated growth catalysts" not in s["key_find"]
+        assert "PM decision" not in s["key_find"]
+        assert "No order submitted" not in s["key_find"]
+
+
+def test_progressive_summary_running_through_step_3():
+    """A run with status='running' and calls through step 3:
+    - Steps 1-2 are 'done' with real content (or neutral completed placeholder).
+    - Step 3 is 'active' with real trader response or in-progress placeholder.
+    - Steps 4-5 are 'pending' with empty key_find.
+    """
+    run = {
+        "id": "run-prog-step-3",
+        "ticker": "NVDA",
+        "status": "running",
+    }
+    llm_calls = [
+        # Step 1 calls
+        {
+            "seq": 1,
+            "node": "Market Analyst",
+            "kind": "llm",
+            "ok": True,
+            "response": "Uptrend with strong momentum.",
+            "ts": "2026-09-21T10:00:00Z",
+        },
+        # Step 2 calls
+        {
+            "seq": 2,
+            "node": "Bull Researcher",
+            "kind": "llm",
+            "ok": True,
+            "response": "Data center demand continues accelerating.",
+            "ts": "2026-09-21T10:01:00Z",
+        },
+        {
+            "seq": 3,
+            "node": "Research Manager",
+            "kind": "llm",
+            "ok": True,
+            "response": "Consensus favors upside given supply constraints.",
+            "ts": "2026-09-21T10:02:00Z",
+        },
+        # Step 3 calls
+        {
+            "seq": 4,
+            "node": "Trader",
+            "kind": "llm",
+            "ok": True,
+            "response": "Proposing 5% position with stop loss at support.",
+            "ts": "2026-09-21T10:03:00Z",
+        },
+    ]
+
+    summary = summarize_run(run, llm_calls=llm_calls)
+    steps = summary["steps"]
+
+    # Step 1: done
+    assert steps[0]["n"] == 1
+    assert steps[0]["state"] == "done"
+    assert "Uptrend with strong momentum" in steps[0]["key_find"]
+
+    # Step 2: done
+    assert steps[1]["n"] == 2
+    assert steps[1]["state"] == "done"
+    assert "Consensus favors upside given supply constraints." in steps[1]["key_find"]
+    assert "Debated growth catalysts against valuation" not in steps[1]["key_find"]
+
+    # Step 3: active (Trader call response used)
+    assert steps[2]["n"] == 3
+    assert steps[2]["state"] == "active"
+    assert "Proposing 5% position with stop loss" in steps[2]["key_find"]
+
+    # Steps 4 and 5: pending
+    assert steps[3]["n"] == 4
+    assert steps[3]["state"] == "pending"
+    assert steps[3]["key_find"] == ""
+    assert "PM decision" not in steps[3]["key_find"]
+
+    assert steps[4]["n"] == 5
+    assert steps[4]["state"] == "pending"
+    assert steps[4]["key_find"] == ""
+    assert "No order submitted" not in steps[4]["key_find"]
+
+
+def test_progressive_summary_running_through_step_4():
+    """A run with status='running' and calls through step 4 (Risk/PM):
+    - Steps 1-3 are 'done'.
+    - Step 4 is 'active'.
+    - Step 5 is 'pending' because no order/recommendation has been stored yet.
+    """
+    run = {
+        "id": "run-prog-step-4",
+        "ticker": "AMZN",
+        "status": "running",
+    }
+    llm_calls = [
+        {"seq": 1, "node": "Market Analyst", "kind": "llm", "ok": True, "response": "Market data", "ts": "2026-09-21T10:00:00Z"},
+        {"seq": 2, "node": "Research Manager", "kind": "llm", "ok": True, "response": "Research consensus", "ts": "2026-09-21T10:01:00Z"},
+        {"seq": 3, "node": "Trader", "kind": "llm", "ok": True, "response": "Trader sizing", "ts": "2026-09-21T10:02:00Z"},
+        {"seq": 4, "node": "Portfolio Manager", "kind": "llm", "ok": True, "response": "Approved allocation of 4%.", "ts": "2026-09-21T10:03:00Z"},
+    ]
+
+    summary = summarize_run(run, llm_calls=llm_calls)
+    steps = summary["steps"]
+
+    assert steps[0]["state"] == "done"
+    assert steps[1]["state"] == "done"
+    assert steps[2]["state"] == "done"
+    assert steps[3]["state"] == "active"
+    assert "Approved allocation of 4%." in steps[3]["key_find"]
+    assert steps[4]["state"] == "pending"
+    assert steps[4]["key_find"] == ""
+
+
+def test_progressive_summary_running_step_5_reached_with_order():
+    """When an order record is present while running, step 5 is recognized."""
+    run = {
+        "id": "run-prog-step-5",
+        "ticker": "TSLA",
+        "status": "running",
+        "order": {
+            "status": "submitted",
+            "qty": 15,
+            "order_type": "bracket",
+            "limit_price": "240.00",
+            "stop_price": "230.00",
+            "take_profit_price": "260.00",
+            "alpaca_order_id": "alpaca-ord-123",
+        },
+    }
+    llm_calls = [
+        {"seq": 1, "node": "Market Analyst", "kind": "llm", "ok": True, "response": "Market data", "ts": "2026-09-21T10:00:00Z"},
+        {"seq": 2, "node": "Research Manager", "kind": "llm", "ok": True, "response": "RM data", "ts": "2026-09-21T10:01:00Z"},
+        {"seq": 3, "node": "Trader", "kind": "llm", "ok": True, "response": "Trader data", "ts": "2026-09-21T10:02:00Z"},
+        {"seq": 4, "node": "Portfolio Manager", "kind": "llm", "ok": True, "response": "PM data", "ts": "2026-09-21T10:03:00Z"},
+    ]
+
+    summary = summarize_run(run, llm_calls=llm_calls)
+    steps = summary["steps"]
+
+    assert steps[0]["state"] == "done"
+    assert steps[1]["state"] == "done"
+    assert steps[2]["state"] == "done"
+    assert steps[3]["state"] == "done"
+    assert steps[4]["state"] == "done"
+    assert "Submitted 15-share BRACKET" in steps[4]["key_find"]
+    assert "alpaca-ord-123" in steps[4]["key_find"]
+
+
+def test_progressive_summary_advisory_in_progress_vs_completed():
+    """Advisory run in progress (no completed_at) uses progressive step states.
+    Advisory run that completed (completed_at set) keeps completed behavior.
+    """
+    # In-progress advisory
+    run_advisory_in_progress = {
+        "id": "run-adv-prog",
+        "ticker": "SPY",
+        "status": "advisory",
+        # completed_at is None or missing
+    }
+    sum_prog = summarize_run(run_advisory_in_progress, llm_calls=[])
+    assert sum_prog["steps"][0]["state"] == "active"
+    assert sum_prog["steps"][1]["state"] == "pending"
+
+    # Completed advisory
+    run_advisory_completed = {
+        "id": "run-adv-comp",
+        "ticker": "SPY",
+        "status": "advisory",
+        "completed_at": "2026-09-21T10:15:00Z",
+    }
+    sum_comp = summarize_run(run_advisory_completed, llm_calls=[])
+    # Completed runs do not mark steps as pending
+    for s in sum_comp["steps"]:
+        assert s.get("state") != "pending"
+

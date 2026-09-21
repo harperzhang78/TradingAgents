@@ -237,6 +237,8 @@ def summarize_run(
     sizing = rec.get("position_sizing") or "5% of portfolio"
     status = run.get("status", "completed")
 
+    is_running = (status == "running") or (status == "advisory" and not run.get("completed_at"))
+
     # Detect failed calls to identify failing step if run failed
     failed_calls = [c for c in llm_calls if c and c.get("ok") is False]
     last_failed_call = None
@@ -266,7 +268,9 @@ def summarize_run(
         failed_err_msg = err_msg
 
     # 1. Overall banner string
-    if ord_info.get("status") == "submitted":
+    if is_running:
+        overall = f"ANALYSIS IN PROGRESS for {ticker}"
+    elif ord_info.get("status") == "submitted":
         qty = ord_info.get("qty", "?")
         order_type = (ord_info.get("order_type") or "bracket").lower()
         limit_p = _to_float(ord_info.get("limit_price"), entry_f if entry_f is not None else 0.0)
@@ -290,116 +294,255 @@ def summarize_run(
     else:
         overall = f"{action or 'ANALYSIS'} {ticker} — {rating}"
 
+    # Node-to-step helper matching _map_node_to_step
+    def _is_step_call(c: dict[str, Any], step_num: int) -> bool:
+        node = c.get("node") or c.get("agent")
+        if not node or not isinstance(node, str):
+            return False
+        node_lower = node.lower()
+        if step_num == 1:
+            return any(k in node_lower for k in ("market", "sentiment", "social", "news", "fundamental"))
+        if step_num == 2:
+            return any(k in node_lower for k in ("bull", "bear", "research manager"))
+        if step_num == 3:
+            return "trader" in node_lower
+        if step_num == 4:
+            return any(k in node_lower for k in ("aggressive", "conservative", "neutral", "portfolio"))
+        if step_num == 5:
+            return any(k in node_lower for k in ("execution", "advisory", "order", "alpaca"))
+        return False
+
     # 2. Step 1: Market & Fundamentals
-    s1_calls = [
-        c for c in llm_calls
-        if any(a in (c.get("node") or "") for a in ("Market", "Sentiment", "News", "Fundamentals"))
-    ]
+    s1_calls = [c for c in llm_calls if _is_step_call(c, 1)]
     s1_llm_count = len([c for c in s1_calls if c.get("kind") == "llm"])
     s1_tools = sorted(list({
         c.get("tool_name") for c in s1_calls
         if c.get("tool_name") and c.get("kind") == "tool"
     }))
-    # If no explicit kind='tool' found, check any call tool_name or tool_calls
     if not s1_tools:
         s1_tools = sorted(list({
             c.get("tool_name") for c in s1_calls
             if c.get("tool_name") and not str(c.get("tool_name")).endswith("Report")
         }))
 
-    s1_key_find = _extract_analyst_key_find(s1_calls)
-
     # 3. Step 2: Debate Bull vs Bear
-    s2_calls = [
-        c for c in llm_calls
-        if any(r in (c.get("node") or "") for r in ("Bull", "Bear", "Research Manager"))
-    ]
+    s2_calls = [c for c in llm_calls if _is_step_call(c, 2)]
     s2_llm_count = len([c for c in s2_calls if c.get("kind") == "llm"])
 
-    # Extract Research Manager synthesis
-    rm_call = _select_representative_call(s2_calls, lambda c: "Research Manager" in (c.get("node") or ""))
+    # 4. Step 3: Trader Position Sizing
+    s3_calls = [c for c in llm_calls if _is_step_call(c, 3)]
+    s3_llm_count = len([c for c in s3_calls if c.get("kind") == "llm"])
+
+    # 5. Step 4: Risk Team Stress Test
+    s4_calls = [c for c in llm_calls if _is_step_call(c, 4)]
+    s4_llm_count = len([c for c in s4_calls if c.get("kind") == "llm"])
+
+    # Progressive step states when running
+    step_states: dict[int, str] = {}
+    if is_running:
+        has_order_or_rec = bool(ord_info) or bool(rec)
+        reached_steps = [
+            s for s, calls in (
+                (1, s1_calls),
+                (2, s2_calls),
+                (3, s3_calls),
+                (4, s4_calls),
+            )
+            if len(calls) > 0
+        ]
+        if has_order_or_rec:
+            reached_steps.append(5)
+
+        active_step = max(reached_steps) if reached_steps else 1
+
+        for n in range(1, 6):
+            if n < active_step:
+                step_states[n] = "done"
+            elif n == active_step:
+                step_states[n] = "active"
+            else:
+                step_states[n] = "pending"
+
+        # Step 5 is pending while running unless an order/recommendation was actually recorded
+        if not has_order_or_rec:
+            step_states[5] = "pending"
+        elif ord_info.get("status") in ("submitted", "skipped", "failed"):
+            step_states[5] = "done"
+
+    # Step 1 Key Finding
+    DEFAULT_S1 = "Consolidated price, technical indicators, news sentiment, and financial fundamentals."
+    s1_extracted = _extract_analyst_key_find(s1_calls)
+    s1_has_real = bool(s1_calls) and (s1_extracted != DEFAULT_S1)
+
+    if is_running:
+        st1 = step_states.get(1, "pending")
+        if st1 == "done":
+            s1_key_find = s1_extracted if s1_has_real else "Completed"
+        elif st1 == "active":
+            s1_key_find = s1_extracted if s1_has_real else "In progress…"
+        else:
+            s1_key_find = ""
+    else:
+        s1_key_find = s1_extracted
+
+    # Step 2 Key Finding
+    rm_call = _select_representative_call(s2_calls, lambda c: "Research Manager" in (c.get("node") or c.get("agent") or ""))
     rm_quote = ""
     if rm_call:
         rm_quote = _extract_first_sentences(rm_call.get("response"), max_sentences=2, max_chars=180)
 
-    # Fallback to recommendation text or thesis
     if not rm_quote and rec.get("trader_investment_plan"):
         rm_quote = _extract_first_sentences(rec.get("trader_investment_plan"), max_sentences=2, max_chars=180)
 
-    if not rm_quote:
-        rm_quote = "Debated growth catalysts against valuation/macro risks; synthesized consensus investment plan."
+    s2_active_quote = rm_quote
+    if not s2_active_quote and s2_calls:
+        any_s2_call = _select_representative_call(s2_calls, lambda c: True)
+        if any_s2_call:
+            s2_active_quote = _extract_first_sentences(any_s2_call.get("response"), max_sentences=2, max_chars=180)
 
-    # 4. Step 3: Trader Position Sizing
-    s3_calls = [c for c in llm_calls if "Trader" in (c.get("node") or "")]
-    s3_llm_count = len([c for c in s3_calls if c.get("kind") == "llm"])
-
-    if action in ("BUY", "SELL"):
-        s3_what = f"Chose {action} with {sizing}."
-        if entry_f is not None:
-            s3_key_find = f"Entry ${entry_f:.2f}, stop ${stop_f:.2f}, target ${target_f:.2f}."
+    if is_running:
+        st2 = step_states.get(2, "pending")
+        if st2 == "done":
+            s2_key_find = rm_quote if rm_quote else (s2_active_quote if s2_active_quote else "Completed")
+        elif st2 == "active":
+            s2_key_find = s2_active_quote if s2_active_quote else "In progress…"
         else:
-            s3_key_find = f"Action: {action}, sizing: {sizing}."
+            s2_key_find = ""
     else:
-        s3_what = "Evaluated market structure and recommended HOLD."
-        s3_key_find = "No new position initiated; maintaining defensive posture."
+        if not rm_quote:
+            rm_quote = "Debated growth catalysts against valuation/macro risks; synthesized consensus investment plan."
+        s2_key_find = rm_quote
 
+    # Step 3 Key Finding & What
+    clean_reason = ""
     if rec.get("reasoning"):
         clean_reason = _extract_first_sentences(rec.get("reasoning"), max_sentences=1, max_chars=120)
-        if clean_reason:
-            s3_key_find += f" Rationale: {clean_reason}"
     else:
-        trader_call = _select_representative_call(s3_calls, lambda c: "Trader" in (c.get("node") or ""))
+        trader_call = _select_representative_call(s3_calls, lambda c: "Trader" in (c.get("node") or c.get("agent") or ""))
         if trader_call:
             clean_reason = _extract_first_sentences(trader_call.get("response"), max_sentences=1, max_chars=120)
-            if clean_reason:
-                s3_key_find += f" Rationale: {clean_reason}"
 
-    # 5. Step 4: Risk Team Stress Test
-    s4_calls = [
-        c for c in llm_calls
-        if any(p in (c.get("node") or "") for p in ("Aggressive", "Conservative", "Neutral", "Portfolio Manager"))
-    ]
-    s4_llm_count = len([c for c in s4_calls if c.get("kind") == "llm"])
+    trader_call = _select_representative_call(s3_calls, lambda c: "Trader" in (c.get("node") or c.get("agent") or ""))
+    trader_resp = _extract_first_sentences(trader_call.get("response"), max_sentences=2, max_chars=160) if trader_call else ""
 
+    real_s3 = ""
+    if action in ("BUY", "SELL"):
+        if entry_f is not None:
+            real_s3 = f"Entry ${entry_f:.2f}, stop ${stop_f:.2f}, target ${target_f:.2f}."
+        else:
+            real_s3 = f"Action: {action}, sizing: {sizing}."
+        if clean_reason:
+            real_s3 += f" Rationale: {clean_reason}"
+    elif action == "HOLD" and rec:
+        real_s3 = "No new position initiated; maintaining defensive posture."
+        if clean_reason:
+            real_s3 += f" Rationale: {clean_reason}"
+    elif clean_reason:
+        real_s3 = clean_reason
+    elif trader_resp:
+        real_s3 = trader_resp
+
+    if is_running:
+        st3 = step_states.get(3, "pending")
+        if st3 == "done":
+            s3_key_find = real_s3 if real_s3 else "Completed"
+            s3_what = f"Chose {action} with {sizing}." if action in ("BUY", "SELL") else ("Evaluated market structure and recommended HOLD." if action == "HOLD" else "Evaluated market structure and position sizing.")
+        elif st3 == "active":
+            s3_key_find = real_s3 if real_s3 else "In progress…"
+            s3_what = f"Chose {action} with {sizing}." if action in ("BUY", "SELL") else "Evaluating market structure and sizing position."
+        else:
+            s3_key_find = ""
+            s3_what = "Trader sizes position and sets risk parameters."
+    else:
+        if action in ("BUY", "SELL"):
+            s3_what = f"Chose {action} with {sizing}."
+            if entry_f is not None:
+                s3_key_find = f"Entry ${entry_f:.2f}, stop ${stop_f:.2f}, target ${target_f:.2f}."
+            else:
+                s3_key_find = f"Action: {action}, sizing: {sizing}."
+        else:
+            s3_what = "Evaluated market structure and recommended HOLD."
+            s3_key_find = "No new position initiated; maintaining defensive posture."
+        if clean_reason:
+            s3_key_find += f" Rationale: {clean_reason}"
+
+    # Step 4 Key Finding
+    pm_call = _select_representative_call(s4_calls, lambda c: "Portfolio Manager" in (c.get("node") or c.get("agent") or ""))
     pm_quote = ""
-    pm_call = _select_representative_call(s4_calls, lambda c: "Portfolio Manager" in (c.get("node") or ""))
     if pm_call:
         pm_quote = _extract_first_sentences(pm_call.get("response"), max_sentences=2, max_chars=180)
 
     if not pm_quote and rec.get("final_trade_decision"):
         pm_quote = _extract_first_sentences(rec.get("final_trade_decision"), max_sentences=2, max_chars=180)
 
-    if not pm_quote:
-        pm_quote = f"Portfolio Manager finalized verdict: {rating} / {action or 'HOLD'}."
+    s4_active_quote = pm_quote
+    if not s4_active_quote and s4_calls:
+        any_s4 = _select_representative_call(s4_calls, lambda c: True)
+        if any_s4:
+            s4_active_quote = _extract_first_sentences(any_s4.get("response"), max_sentences=2, max_chars=180)
 
-    s4_key_find = f"PM decision: {rating} / {action or 'HOLD'} — {pm_quote}"
+    if is_running:
+        st4 = step_states.get(4, "pending")
+        if st4 == "done":
+            if pm_quote:
+                s4_key_find = f"PM decision: {rating} / {action} — {pm_quote}" if action else pm_quote
+            elif s4_active_quote:
+                s4_key_find = s4_active_quote
+            else:
+                s4_key_find = "Completed"
+        elif st4 == "active":
+            if pm_quote:
+                s4_key_find = f"PM decision: {rating} / {action} — {pm_quote}" if action else pm_quote
+            elif s4_active_quote:
+                s4_key_find = s4_active_quote
+            else:
+                s4_key_find = "In progress…"
+        else:
+            s4_key_find = ""
+    else:
+        if not pm_quote:
+            pm_quote = f"Portfolio Manager finalized verdict: {rating} / {action or 'HOLD'}."
+        s4_key_find = f"PM decision: {rating} / {action or 'HOLD'} — {pm_quote}"
 
-    # 6. Step 5: Execution / Advisory
+    # Step 5 Execution / Advisory
     ord_status = (ord_info.get("status") or "").lower() if ord_info else ""
     run_status = (status or "").lower()
     if ord_status == "submitted":
         s5_title = "Execution"
         s5_what = "Auto-trade was ENABLED; order submitted to Alpaca."
-        s5_key_find = (
+        s5_key_find_real = (
             f"Submitted {ord_info.get('qty', '?')}-share {ord_info.get('order_type', 'bracket').upper()} "
             f"bracket to Alpaca (paper). Alpaca Order ID: {ord_info.get('alpaca_order_id', 'confirmed')}."
         )
     elif ord_status == "skipped":
         s5_title = "Execution"
         s5_what = "Auto-trade was DISABLED (Advisory Mode) or order condition skipped."
-        s5_key_find = ord_info.get("skip_reason") or "Order skipped: Advisory mode only (no live order placed)."
+        s5_key_find_real = ord_info.get("skip_reason") or "Order skipped: Advisory mode only (no live order placed)."
     elif ord_status == "failed":
         s5_title = "Execution"
         s5_what = "Order submission attempted but encountered an error."
-        s5_key_find = ord_info.get("error_message") or "Order submission failed."
+        s5_key_find_real = ord_info.get("error_message") or "Order submission failed."
     elif run_status == "advisory" or not ord_info:
         s5_title = "Advisory"
         s5_what = "Advisory analysis completed."
-        s5_key_find = "No order submitted (run in advisory mode)."
+        s5_key_find_real = "No order submitted (run in advisory mode)."
     else:
         s5_title = "Execution"
         s5_what = "Advisory analysis completed."
-        s5_key_find = "No order submitted (run in advisory mode)."
+        s5_key_find_real = "No order submitted (run in advisory mode)."
+
+    if is_running:
+        st5 = step_states.get(5, "pending")
+        if st5 == "done":
+            s5_key_find = s5_key_find_real
+        elif st5 == "active":
+            s5_key_find = s5_key_find_real if (ord_info or rec) else "In progress…"
+        else:
+            s5_title = "Execution"
+            s5_what = "Execute order or provide advisory recommendation."
+            s5_key_find = ""
+    else:
+        s5_key_find = s5_key_find_real
 
     steps = [
         {
@@ -416,7 +559,7 @@ def summarize_run(
             "title": "Debate: Bull vs Bear",
             "who": "Bull Researcher vs Bear Researcher → Research Manager",
             "what": "Bull argued catalysts; Bear highlighted valuation; manager decided direction.",
-            "key_find": rm_quote,
+            "key_find": s2_key_find,
             "llm_count": s2_llm_count,
         },
         {
@@ -444,7 +587,10 @@ def summarize_run(
         },
     ]
 
-    if status == "failed":
+    if is_running:
+        for step in steps:
+            step["state"] = step_states.get(step["n"], "pending")
+    elif status == "failed":
         if last_failed_call and failed_node:
             failed_step_num = _map_node_to_step(failed_node)
             for step in steps:

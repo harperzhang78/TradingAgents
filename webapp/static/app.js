@@ -1681,9 +1681,15 @@ function renderModalSummary() {
       const stepNum = step.n !== undefined ? step.n : idx + 1;
       const isFailed = Boolean(step.failed);
       const isSkipped = Boolean(step.skipped);
+      const stepState = step.state || (isFailed ? 'failed' : isSkipped ? 'skipped' : 'done');
+      const isActive = stepState === 'active';
+      const isPending = stepState === 'pending';
+
       const stepClasses = ['timeline-step'];
       if (isFailed) stepClasses.push('step-failed');
       if (isSkipped) stepClasses.push('step-skipped');
+      if (isActive) stepClasses.push('step-active');
+      if (isPending) stepClasses.push('step-pending');
 
       let statsPills = '';
       if (step.llm_count !== undefined && step.llm_count > 0) {
@@ -1697,6 +1703,49 @@ function renderModalSummary() {
         statsPills += `<span class="chip-stat chip-tool">⚡ ${escapeHtml(step.tools)}</span>`;
       }
 
+      let headerBadges = '';
+      if (isFailed) {
+        headerBadges += '<span class="badge badge-status-err">FAILED</span>';
+      }
+      if (isSkipped) {
+        headerBadges += '<span class="badge badge-skipped">Skipped</span>';
+      }
+      if (isActive) {
+        headerBadges += '<span class="badge badge-running"><span class="spinner" style="display:inline-block; vertical-align:middle; margin-right:4px; width:10px; height:10px; border-width:1.5px;"></span>IN PROGRESS</span>';
+      }
+
+      let findingBox = '';
+      if (isPending) {
+        findingBox = `
+          <div class="step-pending-placeholder text-muted text-xs">
+            <span>⏳ Not started yet</span>
+          </div>
+        `;
+      } else if (isActive) {
+        if (step.key_find && !step.key_find.toLowerCase().startsWith('in progress')) {
+          findingBox = `
+            <div class="key-find-box">
+              <span class="text-dim text-xs" style="text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 2px;">Key Finding</span>
+              <span class="key-find-quote">"${escapeHtml(step.key_find)}"</span>
+            </div>
+          `;
+        } else {
+          findingBox = `
+            <div class="step-active-placeholder text-muted text-xs">
+              <span class="spinner" style="display:inline-block; vertical-align:middle; margin-right:6px; width:12px; height:12px; border-width:2px;"></span>
+              <span>${escapeHtml(step.key_find || 'In progress…')}</span>
+            </div>
+          `;
+        }
+      } else if (step.key_find) {
+        findingBox = `
+          <div class="key-find-box">
+            <span class="text-dim text-xs" style="text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 2px;">Key Finding</span>
+            <span class="key-find-quote">"${escapeHtml(step.key_find)}"</span>
+          </div>
+        `;
+      }
+
       return `
       <div class="${stepClasses.join(' ')}">
         <div class="step-number-bubble">${escapeHtml(stepNum)}</div>
@@ -1704,21 +1753,11 @@ function renderModalSummary() {
           <div class="step-header-row">
             <span class="step-title">${escapeHtml(step.title || 'Decision Step')}</span>
             <span class="step-who">${escapeHtml(step.who || '')}</span>
-            ${isFailed ? `<span class="badge badge-status-err">FAILED</span>` : ''}
-            ${isSkipped ? `<span class="badge badge-skipped">Skipped</span>` : ''}
+            ${headerBadges}
           </div>
           ${isFailed && step.error ? `<div class="step-error-box text-danger text-xs"><strong>Error:</strong> ${escapeHtml(step.error)}</div>` : ''}
           <div class="step-what">${escapeHtml(step.what || '')}</div>
-          ${
-            step.key_find
-              ? `
-            <div class="key-find-box">
-              <span class="text-dim text-xs" style="text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 2px;">Key Finding</span>
-              <span class="key-find-quote">"${escapeHtml(step.key_find)}"</span>
-            </div>
-          `
-              : ''
-          }
+          ${findingBox}
           ${statsPills ? `<div class="step-meta-pills">${statsPills}</div>` : ''}
         </div>
       </div>
