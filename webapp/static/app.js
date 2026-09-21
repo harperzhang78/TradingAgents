@@ -62,6 +62,15 @@ function formatDate(isoStr) {
   }
 }
 
+function formatStepDuration(seconds) {
+  if (seconds === null || seconds === undefined || isNaN(seconds) || seconds < 0) return '';
+  const totalSec = Math.round(seconds);
+  if (totalSec < 60) return `${totalSec}s`;
+  const mins = Math.floor(totalSec / 60);
+  const secs = totalSec % 60;
+  return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+}
+
 function showToast(message, type = 'info') {
   const container = document.getElementById('toast-container');
   const toast = document.createElement('div');
@@ -1707,6 +1716,12 @@ function renderModalSummary() {
           .join('');
       } else if (typeof step.tools === 'string' && step.tools) {
         statsPills += `<span class="chip-stat chip-tool">⚡ ${escapeHtml(step.tools)}</span>`;
+      }
+      if (!isPending && step.duration !== undefined && step.duration !== null) {
+        const durStr = formatStepDuration(step.duration);
+        if (durStr) {
+          statsPills += `<span class="chip-stat chip-duration">⏱ ${escapeHtml(durStr)}</span>`;
+        }
       }
 
       let headerBadges = '';

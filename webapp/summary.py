@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Any, Callable
+
 
 
 def _extract_first_sentences(text: Any, max_sentences: int = 2, max_chars: int = 200) -> str:
@@ -196,6 +198,77 @@ def _extract_analyst_key_find(calls: list[dict[str, Any]]) -> str:
     return "Consolidated price, technical indicators, news sentiment, and financial fundamentals."
 
 
+def _parse_iso_ts(ts_val: Any) -> datetime | None:
+    """Safely parse an ISO-8601 timestamp string into a datetime."""
+    if not ts_val or not isinstance(ts_val, str):
+        return None
+    cleaned = ts_val.strip()
+    if cleaned.endswith("Z"):
+        cleaned = cleaned[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(cleaned)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
+def _compute_step_duration(calls: list[dict[str, Any]]) -> float | None:
+    """Compute elapsed duration in seconds for a step's calls.
+
+    For multiple calls with valid timestamps, elapsed duration is:
+      (max_ts - min_ts) + last_call_latency_ms / 1000.
+    Falls back to summing latency_ms / 1000 across calls if timestamps are missing
+    or there is only a single call.
+    Returns None if there are no calls or no timing data.
+    """
+    if not calls:
+        return None
+
+    parsed: list[tuple[dict[str, Any], datetime | None, float]] = []
+    for c in calls:
+        if not isinstance(c, dict):
+            continue
+        dt = _parse_iso_ts(c.get("ts"))
+        lat_ms = _to_float(c.get("latency_ms"), 0.0)
+        parsed.append((c, dt, lat_ms))
+
+    if not parsed:
+        return None
+
+    valid_ts = [(c, dt, lat) for (c, dt, lat) in parsed if dt is not None]
+
+    if len(valid_ts) >= 2:
+        min_dt = min(dt for (_, dt, _) in valid_ts)
+        max_call, max_dt, max_lat = max(
+            valid_ts,
+            key=lambda item: (item[1], item[0].get("seq", 0), item[2]),
+        )
+        last_lat_sec = max(0.0, max_lat / 1000.0)
+        elapsed = (max_dt - min_dt).total_seconds() + last_lat_sec
+        if elapsed > 0:
+            return round(elapsed, 2)
+
+    total_lat_ms = sum(lat for (_, _, lat) in parsed if lat > 0)
+    if total_lat_ms > 0:
+        return round(total_lat_ms / 1000.0, 2)
+
+    return None
+
+
+def _step_duration(seconds: float | None) -> str | None:
+    """Format duration in seconds into a human-readable string (e.g. '45s', '1m 12s')."""
+    if seconds is None or seconds < 0:
+        return None
+    total_sec = int(round(seconds))
+    if total_sec < 60:
+        return f"{total_sec}s"
+    mins = total_sec // 60
+    secs = total_sec % 60
+    return f"{mins}m {secs}s" if secs > 0 else f"{mins}m"
+
+
 def _map_node_to_step(node: str | None) -> int:
     """Map LangGraph node or agent name to pipeline step number (1 to 5)."""
     if not node:
@@ -336,6 +409,16 @@ def summarize_run(
     # 5. Step 4: Risk Team Stress Test
     s4_calls = [c for c in llm_calls if _is_step_call(c, 4)]
     s4_llm_count = len([c for c in s4_calls if c.get("kind") == "llm"])
+
+    # 6. Step 5: Execution / Advisory calls
+    s5_calls = [c for c in llm_calls if _is_step_call(c, 5)]
+
+    # Compute duration (in seconds) for each step
+    s1_duration = _compute_step_duration(s1_calls)
+    s2_duration = _compute_step_duration(s2_calls)
+    s3_duration = _compute_step_duration(s3_calls)
+    s4_duration = _compute_step_duration(s4_calls)
+    s5_duration = _compute_step_duration(s5_calls)
 
     # Progressive step states when running
     step_states: dict[int, str] = {}
@@ -553,6 +636,7 @@ def summarize_run(
             "key_find": s1_key_find,
             "llm_count": s1_llm_count,
             "tools": s1_tools,
+            "duration": s1_duration,
         },
         {
             "n": 2,
@@ -561,6 +645,7 @@ def summarize_run(
             "what": "Bull argued catalysts; Bear highlighted valuation; manager decided direction.",
             "key_find": s2_key_find,
             "llm_count": s2_llm_count,
+            "duration": s2_duration,
         },
         {
             "n": 3,
@@ -569,6 +654,7 @@ def summarize_run(
             "what": s3_what,
             "key_find": s3_key_find,
             "llm_count": s3_llm_count,
+            "duration": s3_duration,
         },
         {
             "n": 4,
@@ -577,6 +663,7 @@ def summarize_run(
             "what": "Aggressive evaluated upside; Conservative checked downside; PM approved.",
             "key_find": s4_key_find,
             "llm_count": s4_llm_count,
+            "duration": s4_duration,
         },
         {
             "n": 5,
@@ -584,6 +671,7 @@ def summarize_run(
             "who": "Dashboard",
             "what": s5_what,
             "key_find": s5_key_find,
+            "duration": s5_duration,
         },
     ]
 

@@ -311,3 +311,178 @@ def test_in_flight_ui_contract_and_app_js():
     assert "getTickerColorStyle" in app_js
     assert "setInFlightConsoleFilter" in app_js
 
+    # Step duration pill contract
+    assert "formatStepDuration" in app_js
+    assert "chip-duration" in app_js
+    assert "!isPending && step.duration !== undefined" in app_js
+
+
+def test_summarize_run_per_step_duration_synthetic_calls():
+    """Verify summarize_run computes per-step duration from ts and latency_ms."""
+    run = {
+        "id": "test-dur-run-1",
+        "ticker": "AAPL",
+        "status": "completed",
+    }
+    llm_calls = [
+        # Step 1: 2 calls with timestamps (elapsed = 4s diff + 2s latency = 6.0s)
+        {
+            "seq": 1,
+            "node": "Market Analyst",
+            "agent": "Market Analyst",
+            "kind": "llm",
+            "ok": True,
+            "ts": "2026-09-21T10:00:00Z",
+            "latency_ms": 1500,
+            "response": "Market data loaded",
+        },
+        {
+            "seq": 2,
+            "node": "Sentiment Analyst",
+            "agent": "Sentiment Analyst",
+            "kind": "llm",
+            "ok": True,
+            "ts": "2026-09-21T10:00:04Z",
+            "latency_ms": 2000,
+            "response": {"band": "Bullish", "score": 8},
+        },
+        # Step 2: 1 call with ts and latency (fallback to latency = 3.2s)
+        {
+            "seq": 3,
+            "node": "Research Manager",
+            "agent": "Research Manager",
+            "kind": "llm",
+            "ok": True,
+            "ts": "2026-09-21T10:00:10Z",
+            "latency_ms": 3200,
+            "response": "Bullish consensus reached",
+        },
+        # Step 3: 2 calls with missing ts (fallback to sum latency = 1.1s + 0.9s = 2.0s)
+        {
+            "seq": 4,
+            "node": "Trader",
+            "agent": "Trader",
+            "kind": "llm",
+            "ok": True,
+            "ts": None,
+            "latency_ms": 1100,
+            "response": "Buy 10 shares",
+        },
+        {
+            "seq": 5,
+            "node": "Trader",
+            "agent": "Trader",
+            "kind": "tool",
+            "tool_name": "check_risk",
+            "ok": True,
+            "ts": None,
+            "latency_ms": 900,
+            "response": "Risk check ok",
+        },
+        # Step 4 and Step 5: no calls
+    ]
+
+    summary = summarize_run(run, llm_calls=llm_calls)
+    steps = summary["steps"]
+    assert len(steps) == 5
+
+    # Step 1 duration: (10:00:04 - 10:00:00) + 2000ms / 1000 = 6.0s
+    assert steps[0]["n"] == 1
+    assert steps[0]["duration"] == 6.0
+
+    # Step 2 duration: 3200ms / 1000 = 3.2s
+    assert steps[1]["n"] == 2
+    assert steps[1]["duration"] == 3.2
+
+    # Step 3 duration: (1100 + 900)ms / 1000 = 2.0s
+    assert steps[2]["n"] == 3
+    assert steps[2]["duration"] == 2.0
+
+    # Step 4 has no calls -> duration is None
+    assert steps[3]["n"] == 4
+    assert steps[3]["duration"] is None
+
+    # Step 5 has no calls -> duration is None
+    assert steps[4]["n"] == 5
+    assert steps[4]["duration"] is None
+
+
+def test_summarize_run_duration_empty_or_no_timing():
+    """Verify steps with no calls or zero timing data yield duration None."""
+    run = {"id": "test-dur-empty", "ticker": "TSLA", "status": "completed"}
+
+    # No calls at all
+    sum_no_calls = summarize_run(run, llm_calls=[])
+    for s in sum_no_calls["steps"]:
+        assert s["duration"] is None
+
+    # Calls with no timing data (0 latency, missing ts)
+    no_timing_calls = [
+        {"seq": 1, "node": "Market Analyst", "kind": "llm", "ok": True, "ts": None, "latency_ms": 0},
+        {"seq": 2, "node": "Trader", "kind": "llm", "ok": True, "ts": "", "latency_ms": None},
+    ]
+    sum_no_timing = summarize_run(run, llm_calls=no_timing_calls)
+    for s in sum_no_timing["steps"]:
+        assert s["duration"] is None
+
+
+def test_step_duration_helper():
+    from webapp.summary import _step_duration
+
+    assert _step_duration(None) is None
+    assert _step_duration(-5) is None
+    assert _step_duration(0) == "0s"
+    assert _step_duration(34) == "34s"
+    assert _step_duration(45.4) == "45s"
+    assert _step_duration(60) == "1m"
+    assert _step_duration(72) == "1m 12s"
+    assert _step_duration(125) == "2m 5s"
+
+
+def test_api_summary_includes_step_durations():
+    """End-to-end API test: GET /api/runs/{id}/summary returns duration in steps."""
+    run_id = str(uuid.uuid4())
+    create_run(run_id, "NVDA", "2026-09-21", "manual")
+    calls = [
+        {
+            "node": "Market Analyst",
+            "agent": "Market Analyst",
+            "kind": "llm",
+            "tool_name": None,
+            "request": "analyze",
+            "response": "Analysis complete",
+            "ok": True,
+            "latency_ms": 2500,
+            "error": None,
+            "ts": "2026-09-21T12:00:00Z",
+        },
+        {
+            "node": "Sentiment Analyst",
+            "agent": "Sentiment Analyst",
+            "kind": "llm",
+            "tool_name": None,
+            "request": "analyze sentiment",
+            "response": {"band": "Bullish", "score": 9},
+            "ok": True,
+            "latency_ms": 3000,
+            "error": None,
+            "ts": "2026-09-21T12:00:05Z",
+        },
+    ]
+    insert_llm_calls(run_id, calls)
+    update_run_status(run_id, "completed")
+
+    res = client.get(f"/api/runs/{run_id}/summary")
+    assert res.status_code == 200
+    data = res.json()
+    steps = data["steps"]
+    assert len(steps) == 5
+    # Step 1 has (12:00:05 - 12:00:00) + 3.0s = 8.0s
+    assert steps[0]["duration"] == 8.0
+    # Other steps have no calls -> duration None
+    assert steps[1]["duration"] is None
+    assert steps[2]["duration"] is None
+    assert steps[3]["duration"] is None
+    assert steps[4]["duration"] is None
+
+
