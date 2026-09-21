@@ -145,6 +145,111 @@ def fetch_last_close_price(ticker: str) -> float | None:
     return None
 
 
+def get_stock_quote(symbol: str, client: Any = None) -> dict[str, Any] | None:
+    """Fetch current price, previous close, and daily change percentage for a ticker symbol."""
+    sym = symbol.strip().upper()
+    if not sym:
+        return None
+    try:
+        if client is None:
+            api_key, secret_key, _ = get_alpaca_credentials()
+            if not api_key or not secret_key:
+                return None
+            from alpaca.data import StockHistoricalDataClient
+            client = StockHistoricalDataClient(api_key, secret_key)
+
+        from alpaca.data.requests import StockBarsRequest, StockLatestTradeRequest
+        from alpaca.data.timeframe import TimeFrame
+
+        current_price: float | None = None
+
+        # Fetch recent daily bars for previous close and fallback current price
+        bars = None
+        try:
+            req = StockBarsRequest(symbol_or_symbols=sym, timeframe=TimeFrame.Day, limit=3)
+            bars_resp = client.get_stock_bars(req)
+            if bars_resp is not None:
+                if hasattr(bars_resp, "__getitem__"):
+                    try:
+                        if sym in bars_resp:
+                            bars = bars_resp[sym]
+                        elif symbol in bars_resp:
+                            bars = bars_resp[symbol]
+                    except Exception:
+                        pass
+                if bars is None and hasattr(bars_resp, "data") and isinstance(bars_resp.data, dict):
+                    bars = bars_resp.data.get(sym) or bars_resp.data.get(symbol)
+                if bars is None and isinstance(bars_resp, dict):
+                    bars = bars_resp.get(sym) or bars_resp.get(symbol)
+        except Exception as e:
+            logger.warning("Bars lookup failed for %s: %s", sym, e)
+
+        def _extract_close(b: Any) -> float | None:
+            if b is None:
+                return None
+            for attr in ("close", "c"):
+                val = getattr(b, attr, None)
+                if val is not None:
+                    try:
+                        return float(val)
+                    except (ValueError, TypeError):
+                        pass
+            if isinstance(b, dict):
+                for key in ("close", "c"):
+                    val = b.get(key)
+                    if val is not None:
+                        try:
+                            return float(val)
+                        except (ValueError, TypeError):
+                            pass
+            return None
+
+        prev_close: float | None = None
+        if bars and len(bars) >= 2:
+            prev_close = _extract_close(bars[-2])
+
+        # Attempt to get latest trade price first
+        try:
+            if hasattr(client, "get_stock_latest_trade"):
+                trade_resp = client.get_stock_latest_trade(StockLatestTradeRequest(symbol_or_symbols=sym))
+                trade = None
+                if trade_resp and sym in trade_resp:
+                    trade = trade_resp[sym]
+                elif trade_resp and symbol in trade_resp:
+                    trade = trade_resp[symbol]
+
+                if trade is not None:
+                    price = getattr(trade, "price", None)
+                    if price is None and isinstance(trade, dict):
+                        price = trade.get("price")
+                    if price is not None:
+                        current_price = float(price)
+        except Exception as e:
+            logger.debug("Latest trade lookup skipped for %s: %s", sym, e)
+
+        # Fallback current_price to the most recent bar close
+        if current_price is None and bars and len(bars) >= 1:
+            current_price = _extract_close(bars[-1])
+
+        if current_price is None:
+            return None
+
+        change_pct: float | None = None
+        if prev_close:
+            change_pct = round(((current_price - prev_close) / prev_close) * 100.0, 4)
+
+        return {
+            "symbol": sym,
+            "current_price": current_price,
+            "prev_close": prev_close,
+            "change_pct": change_pct,
+        }
+    except Exception as e:
+        logger.warning("Failed to get stock quote for %s: %s", symbol, e)
+        return None
+
+
+
 # ---------------------------------------------------------------------------
 # Sizing helper
 # ---------------------------------------------------------------------------

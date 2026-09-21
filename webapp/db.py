@@ -633,6 +633,15 @@ def record_order_execution(
             return cur.lastrowid
 
 
+def update_order_status(run_id_or_id: int | str, status: str) -> None:
+    """Update order status by order ID or run ID."""
+    with get_db() as conn:
+        if isinstance(run_id_or_id, int) or (isinstance(run_id_or_id, str) and run_id_or_id.isdigit()):
+            conn.execute("UPDATE orders SET status = ? WHERE id = ?", (status, int(run_id_or_id)))
+        else:
+            conn.execute("UPDATE orders SET status = ? WHERE run_id = ?", (status, str(run_id_or_id)))
+
+
 # ---------------------------------------------------------------------------
 # LLM Calls Queries
 # ---------------------------------------------------------------------------

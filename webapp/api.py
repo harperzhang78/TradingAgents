@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -9,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from webapp.db import (
     add_watchlist_item,
+    append_run_log,
     delete_run,
     get_all_settings,
     get_llm_calls,
@@ -25,6 +27,7 @@ from webapp.db import (
     remove_watchlist_item,
     remove_watchlist_items,
     set_setting,
+    update_order_status,
     update_watchlist_item,
 )
 from webapp import llm_settings
@@ -33,8 +36,10 @@ from webapp.execution import (
     cancel_live_order,
     execute_recommendation,
     get_account_overview,
+    get_alpaca_credentials,
     get_live_order,
     get_live_orders,
+    get_stock_quote,
 )
 from webapp.runner import runner
 from webapp.symbols import get_symbol_info, search_symbols
@@ -158,6 +163,57 @@ def get_symbol_detail(symbol: str) -> dict[str, str]:
     if not info:
         raise HTTPException(status_code=404, detail=f"Symbol '{symbol}' not found")
     return info
+
+
+# ---------------------------------------------------------------------------
+# Stock Quotes & Market Data
+# ---------------------------------------------------------------------------
+
+@router.get("/stocks/quotes")
+def get_stock_quotes(
+    symbols: str | None = Query(default=None, description="Comma-separated symbols (default: watchlist)"),
+) -> dict[str, Any]:
+    """Retrieve current price and daily change % for symbols (default: current watchlist)."""
+    try:
+        if symbols is not None and symbols.strip():
+            sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        else:
+            sym_list = [item["symbol"].strip().upper() for item in get_watchlist() if item.get("symbol")]
+
+        # Deduplicate while preserving order, cap at ~40 symbols
+        seen = set()
+        unique_syms = []
+        for s in sym_list:
+            if s not in seen:
+                seen.add(s)
+                unique_syms.append(s)
+        unique_syms = unique_syms[:40]
+
+        if not unique_syms:
+            return {}
+
+        client = None
+        try:
+            api_key, secret_key, _ = get_alpaca_credentials()
+            if api_key and secret_key:
+                from alpaca.data import StockHistoricalDataClient
+                client = StockHistoricalDataClient(api_key, secret_key)
+        except Exception as e:
+            logger.warning("Could not initialize Alpaca data client for quotes: %s", e)
+
+        results: dict[str, Any] = {}
+        for sym in unique_syms:
+            try:
+                quote = get_stock_quote(sym, client=client)
+                if quote is not None:
+                    results[sym] = quote
+            except Exception as e:
+                logger.warning("Failed to fetch quote for %s: %s", sym, e)
+
+        return results
+    except Exception as e:
+        logger.error("Error in get_stock_quotes: %s", e)
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +568,64 @@ def execute_recommendation_by_id(
     except Exception as exc:
         logger.error("Failed to execute recommendation %s: %s", rec_id, exc, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Alpaca order execution failed: {exc}")
+
+
+@router.post("/runs/{run_id}/cancel")
+def cancel_run_order(run_id: str) -> dict[str, Any]:
+    """Cancel a pending (submitted/open) order for a run."""
+    run = get_run(run_id)
+    order = run.get("order") if run else None
+    if not order:
+        order = get_order_by_run(run_id)
+
+    if not order or order.get("status") != "submitted" or not order.get("alpaca_order_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="No cancelable (open) order for this run",
+        )
+
+    alpaca_order_id = str(order["alpaca_order_id"])
+
+    # Verify live order state via Alpaca
+    try:
+        live_order = get_live_order(alpaca_order_id)
+    except Exception as exc:
+        logger.error("Failed to fetch live order %s from Alpaca: %s", alpaca_order_id, exc)
+        raise HTTPException(status_code=502, detail=f"Alpaca service error: {exc}")
+
+    terminal_statuses = {"filled", "cancelled", "canceled", "expired", "done", "rejected"}
+    if live_order is None or (live_order.get("status") or "").lower() in terminal_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail="Order is no longer open; nothing to cancel.",
+        )
+
+    # Cancel on Alpaca
+    try:
+        cancel_live_order(alpaca_order_id)
+    except Exception as exc:
+        logger.error("Failed to cancel live order %s on Alpaca: %s", alpaca_order_id, exc)
+        raise HTTPException(status_code=502, detail=f"Alpaca order cancellation failed: {exc}")
+
+    # Update DB order status
+    try:
+        update_order_status(run_id, "cancelled")
+    except Exception as e:
+        logger.warning("Could not update order status for run %s: %s", run_id, e)
+
+    # Append run log
+    try:
+        now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        append_run_log(run_id, f"[{now_str}] 🚫 Order cancelled on Alpaca (Order ID: {alpaca_order_id})\n")
+    except Exception as e:
+        logger.warning("Could not append log for cancelled order on run %s: %s", run_id, e)
+
+    return {
+        "success": True,
+        "run_id": run_id,
+        "alpaca_order_id": alpaca_order_id,
+        "status": "cancelled",
+    }
 
 
 # ---------------------------------------------------------------------------

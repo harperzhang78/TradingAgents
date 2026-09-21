@@ -5,6 +5,7 @@
 const state = {
   account: null,
   watchlist: [],
+  stockQuotes: {},
   selectedWatchlist: new Set(),
   liveOrders: [],
   llmConfig: null,
@@ -125,8 +126,21 @@ async function fetchWatchlist() {
   try {
     state.watchlist = await api('/api/watchlist');
     renderWatchlist();
+    loadStockQuotes();
   } catch (err) {
     console.error('Watchlist fetch error:', err);
+  }
+}
+
+async function loadStockQuotes() {
+  try {
+    const quotes = await api('/api/stocks/quotes');
+    if (quotes && typeof quotes === 'object') {
+      state.stockQuotes = { ...state.stockQuotes, ...quotes };
+      renderWatchlist();
+    }
+  } catch (err) {
+    console.warn('Stock quotes fetch warning:', err);
   }
 }
 
@@ -175,6 +189,7 @@ async function refreshAll() {
     fetchSettings(),
     fetchLlmConfig(),
     fetchWatchlist(),
+    loadStockQuotes(),
     fetchRuns(),
     fetchLiveOrders(),
     fetchInFlightDetail(),
@@ -364,7 +379,7 @@ function renderWatchlist() {
   count.textContent = activeCount;
 
   if (items.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6" class="text-center py-4 text-muted">Watchlist is empty. Add a symbol above.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="text-center py-4 text-muted">Watchlist is empty. Add a symbol above.</td></tr>`;
     onWatchlistSelectChange();
     return;
   }
@@ -392,6 +407,20 @@ function renderWatchlist() {
         ? `<span class="badge badge-paper">Owned: ${pos.qty} shs</span>`
         : `<span class="text-dim text-xs">Flat</span>`;
 
+      const quote = state.stockQuotes ? state.stockQuotes[sym] : null;
+      const priceText = quote && quote.current_price !== null && quote.current_price !== undefined
+        ? formatCurrency(quote.current_price)
+        : '—';
+      let chgHtml = `<span class="chip-change chip-change-neutral text-dim">—</span>`;
+      if (quote && quote.change_pct !== null && quote.change_pct !== undefined && !isNaN(quote.change_pct)) {
+        const val = Number(quote.change_pct);
+        if (val >= 0) {
+          chgHtml = `<span class="chip-change chip-change-up text-success">▲ +${val.toFixed(2)}%</span>`;
+        } else {
+          chgHtml = `<span class="chip-change chip-change-down text-danger">▼ ${val.toFixed(2)}%</span>`;
+        }
+      }
+
       return `
       <tr>
         <td style="width: 38px; text-align: center;">
@@ -404,6 +433,8 @@ function renderWatchlist() {
           </label>
         </td>
         <td class="symbol-cell">${sym}</td>
+        <td class="font-mono text-sm">${priceText}</td>
+        <td>${chgHtml}</td>
         <td>${posText}</td>
         <td class="text-muted text-xs">${escapeHtml(item.notes || '-')}</td>
         <td class="text-right">
@@ -881,6 +912,7 @@ function renderRuns() {
       let orderBoxHtml = '';
       if (order) {
         if (order.status === 'submitted') {
+          const canCancel = Boolean(order.alpaca_order_id);
           orderBoxHtml = `
           <div class="order-box order-box-submitted">
             <div>
@@ -889,7 +921,22 @@ function renderRuns() {
             </div>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
               <span class="badge badge-buy">SUBMITTED</span>
+              ${canCancel ? `<button class="btn btn-danger btn-sm" onclick="cancelRunOrder('${run.id}')" title="Cancel this order on Alpaca">✕ Cancel Order</button>` : ''}
               ${isReview ? reviewHint : `<button class="btn btn-confirm-reexecute btn-sm btn-confirm-execute" onclick="openExecuteModal('${run.id}')" title="Order was already submitted. Click to review or re-execute.">
+                ⚡ Re-execute
+              </button>`}
+            </div>
+          </div>
+        `;
+        } else if (order.status === 'cancelled' || order.status === 'canceled') {
+          orderBoxHtml = `
+          <div class="order-box order-box-skipped">
+            <div>
+              <strong>Order Cancelled:</strong> ${order.side ? order.side.toUpperCase() : ''} ${order.qty || ''} shares (Alpaca ID: ${order.alpaca_order_id || 'Cancelled'})
+            </div>
+            <div style="display: flex; gap: 0.5rem; align-items: center;">
+              <span class="badge">CANCELLED</span>
+              ${isNonActionable ? reviewHint : `<button class="btn btn-success btn-sm btn-confirm-execute" onclick="openExecuteModal('${run.id}')" title="Re-execute order to Alpaca">
                 ⚡ Re-execute
               </button>`}
             </div>
@@ -1352,6 +1399,23 @@ async function cancelLiveOrder(orderId) {
       await fetchLiveOrders();
       await fetchAccount();
     }, 600);
+  } catch (err) {
+    showToast(`Failed to cancel order: ${err.message}`, 'error');
+  }
+}
+
+async function cancelRunOrder(runId) {
+  if (!confirm('Cancel this order on Alpaca? This cannot be undone.')) return;
+  try {
+    await api(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' });
+    showToast('Order cancelled successfully', 'success');
+    await fetchRuns();
+    renderRuns();
+    await fetchLiveOrders();
+    await fetchAccount();
+    if (state.activeModalRunId === runId) {
+      await updateModalData();
+    }
   } catch (err) {
     showToast(`Failed to cancel order: ${err.message}`, 'error');
   }
@@ -2409,10 +2473,11 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchInFlightDetail();
   }, 3500);
 
-  // Background polling every 8 seconds for runs & account
+  // Background polling every 8 seconds for runs, account & quotes
   setInterval(() => {
     fetchRuns();
     fetchAccount();
+    loadStockQuotes();
   }, 8000);
 
   // Background polling every 30 seconds for live orders
@@ -2440,6 +2505,8 @@ window.triggerSingleRun = triggerSingleRun;
 window.triggerRunAllWatchlist = triggerRunAllWatchlist;
 window.removeWatchlistSymbol = removeWatchlistSymbol;
 window.cancelLiveOrder = cancelLiveOrder;
+window.cancelRunOrder = cancelRunOrder;
+window.loadStockQuotes = loadStockQuotes;
 window.toggleWatchlistEnabled = toggleWatchlistEnabled;
 window.toggleAutoTrade = toggleAutoTrade;
 window.refreshAll = refreshAll;

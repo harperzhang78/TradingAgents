@@ -199,6 +199,30 @@ body {
   50% { opacity: 0.55; }
 }
 
+/* Stock Quotes: Price and Daily Change */
+.chip-change {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.chip-change-up {
+  color: var(--success);
+  background: rgba(16, 185, 129, 0.12);
+}
+.chip-change-down {
+  color: var(--danger);
+  background: rgba(239, 68, 68, 0.12);
+}
+.chip-change-neutral {
+  color: var(--text-dim);
+  background: transparent;
+}
+
 /* Toggle Switch & Pills */
 .toggle-pill {
   display: flex;
