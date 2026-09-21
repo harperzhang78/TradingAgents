@@ -619,7 +619,18 @@ def execute_recommendation(
     action = (recommendation.get("action") or "").strip().upper()
     rating = (recommendation.get("rating") or "").strip().upper()
 
-    # Determine side (explicit override takes precedence)
+    # Determine side — HOLD/REVIEW is absolute: reject immediately regardless of overrides.
+    _is_non_actionable = (
+        action in ("HOLD", "REVIEW", "")
+        and rating in ("HOLD", "REVIEW", "NEUTRAL", "")
+    )
+    if _is_non_actionable:
+        raise ValueError(
+            f"Cannot execute order: recommendation is '{rating or 'HOLD'}' (non-actionable). "
+            f"A HOLD/REVIEW rating cannot be converted to a trade."
+        )
+
+    # For actionable ratings, an explicit side override takes precedence
     if overrides.get("side"):
         side = overrides["side"].strip().lower()
     elif action == "BUY":

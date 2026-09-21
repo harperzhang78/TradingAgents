@@ -784,7 +784,11 @@ function renderRuns() {
       const actionUpper = (rec && rec.action) ? rec.action.trim().toUpperCase() : '';
       const ratingUpper = (rec && rec.rating) ? rec.rating.trim().toUpperCase() : '';
       const isReview = ratingUpper === 'REVIEW';
-      const reviewHint = '<span class="text-muted text-xs">Requires manual review (non-actionable)</span>';
+      const isHold = (ratingUpper === 'HOLD' || ratingUpper === 'NEUTRAL') && actionUpper !== 'BUY' && actionUpper !== 'SELL';
+      const isNonActionable = isReview || isHold;
+      const reviewHint = isReview
+        ? '<span class="text-muted text-xs">Requires manual review (non-actionable)</span>'
+        : '<span class="text-muted text-xs">HOLD — no order will be placed</span>';
       const orderSideUpper = (order && order.side) ? order.side.trim().toUpperCase() : '';
 
       // An order is already live executed if it has status 'submitted'
@@ -802,7 +806,7 @@ function renderRuns() {
       const hasRec = Boolean(rec && (rec.action || rec.rating || (rec.entry_price !== null && rec.entry_price !== undefined)));
       const hasOrder = Boolean(order && (orderSideUpper === 'BUY' || orderSideUpper === 'SELL'));
 
-      if (!isRunning && !isReview && (hasRec || hasOrder || isAdvisory)) {
+      if (!isRunning && !isNonActionable && (hasRec || hasOrder || isAdvisory)) {
         canExecute = true;
         if (isSubmitted) {
           executeBtnLabel = '⚡ Re-execute Order';
@@ -823,6 +827,8 @@ function renderRuns() {
         actionBadge = `<span class="badge badge-sell">FAILED</span>`;
       } else if (isReview) {
         actionBadge = '<span class="badge badge-review">REVIEW</span>';
+      } else if (isHold) {
+        actionBadge = '<span class="badge badge-hold">HOLD</span>';
       } else if (actionUpper || ratingUpper) {
         const displayAct = actionUpper || ratingUpper;
         if (displayAct === 'BUY' || displayAct === 'OVERWEIGHT') {
@@ -888,7 +894,7 @@ function renderRuns() {
             </div>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
               <span class="badge">SKIPPED</span>
-              ${isReview ? reviewHint : `<button class="btn btn-success btn-sm btn-confirm-execute" onclick="openExecuteModal('${run.id}')" title="Confirm &amp; Execute order to Alpaca">
+              ${isNonActionable ? reviewHint : `<button class="btn btn-success btn-sm btn-confirm-execute" onclick="openExecuteModal('${run.id}')" title="Confirm &amp; Execute order to Alpaca">
                 ⚡ Confirm &amp; Execute
               </button>`}
             </div>
@@ -902,14 +908,14 @@ function renderRuns() {
             </div>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
               <span class="badge badge-sell">FAILED</span>
-              ${isReview ? reviewHint : `<button class="btn btn-success btn-sm btn-confirm-execute" onclick="openExecuteModal('${run.id}')" title="Retry &amp; Execute order to Alpaca">
+              ${isNonActionable ? reviewHint : `<button class="btn btn-success btn-sm btn-confirm-execute" onclick="openExecuteModal('${run.id}')" title="Retry &amp; Execute order to Alpaca">
                 ⚡ Retry &amp; Execute
               </button>`}
             </div>
           </div>
         `;
         }
-      } else if (isReview && !isRunning) {
+      } else if (isNonActionable && !isRunning) {
         orderBoxHtml = `<div class="order-box order-box-advisory">${reviewHint}</div>`;
       } else if (canExecute) {
         orderBoxHtml = `
@@ -2024,6 +2030,23 @@ function openExecuteModal(runId) {
 
   const action = ((rec && rec.action) || '').toUpperCase();
   const rating = ((rec && rec.rating) || '').toUpperCase();
+  const isNonActionable = rating === 'REVIEW' || ((rating === 'HOLD' || rating === 'NEUTRAL') && action !== 'BUY' && action !== 'SELL');
+
+  if (isNonActionable && !isSubmitted) {
+    const alertEl2 = document.getElementById('exec-modal-alert');
+    if (alertEl2) {
+      alertEl2.innerHTML = `⛔ <strong>Non-actionable rating (${rating || 'HOLD'}):</strong> This recommendation cannot be executed as an order. A ${rating || 'HOLD'} decision means no trade is placed.`;
+      alertEl2.style.color = '';
+      alertEl2.className = 'alert alert-danger';
+    }
+    const submitBtn = document.getElementById('exec-modal-submit');
+    if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '⚠️ Non-actionable — cannot execute'; }
+    const modal = document.getElementById('execute-modal');
+    if (modal) modal.classList.remove('hidden');
+    document.getElementById('exec-run-id').value = runId;
+    return;
+  }
+
   let side = 'buy';
   if (order && (order.side === 'buy' || order.side === 'sell')) {
     side = order.side.toLowerCase();

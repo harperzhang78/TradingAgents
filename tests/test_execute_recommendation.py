@@ -69,6 +69,36 @@ def test_execute_run_hold_action_rejected():
     assert "non-actionable" in res.json()["detail"].lower() or "hold" in res.json()["detail"].lower()
 
 
+def test_execute_run_hold_rejected_even_with_side_override():
+    """Regression: the frontend always sends side='buy' in the execute modal.
+    Previously the backend side-determination short-circuited on overrides['side']
+    before the HOLD guard was reached, so a HOLD recommendation would still place
+    a BUY order. HOLD/REVIEW must be absolute and reject regardless of overrides.
+    """
+    run_id = str(uuid.uuid4())
+    create_run(run_id, "IVV", "2026-09-20", "manual")
+    create_recommendation(
+        run_id=run_id,
+        ticker="IVV",
+        trade_date="2026-09-20",
+        action="HOLD",
+        rating="HOLD",
+        entry_price=None,
+        stop_loss=None,
+        price_target=None,
+        position_sizing="5% of portfolio",
+        reasoning="Balanced risk/reward; maintain position.",
+    )
+    update_run_status(run_id, "advisory")
+
+    # Frontend modal defaults side to 'buy' even for a HOLD — this must be rejected.
+    res = client.post(f"/api/runs/{run_id}/execute-recommendation", json={"side": "buy"})
+    assert res.status_code == 400
+    assert "non-actionable" in res.json()["detail"].lower() or "hold" in res.json()["detail"].lower()
+    # No order should have been recorded for this run.
+    assert get_order_by_run(run_id) is None
+
+
 @patch("webapp.execution.fetch_last_close_price")
 @patch("webapp.execution.get_account_overview")
 @patch("webapp.execution.submit_alpaca_order")
@@ -416,7 +446,11 @@ def test_reexecute_order_with_flag(mock_submit, mock_acct, mock_price):
 @patch("webapp.execution.get_account_overview")
 @patch("webapp.execution.submit_alpaca_order")
 def test_execute_alias_route_and_hold_with_side_override(mock_submit, mock_acct, mock_price):
-    """Verify /api/runs/{run_id}/execute alias route and executing HOLD with side override."""
+    """Verify /api/runs/{run_id}/execute alias route rejects HOLD even with side override.
+    
+    Previously this test asserted 200 (bug: side override bypassed HOLD guard).
+    Now HOLD is absolute — the API must reject regardless of the 'side' override.
+    """
     mock_acct.return_value = {
         "status": "AccountStatus.ACTIVE",
         "equity": 100000.0,
@@ -452,7 +486,7 @@ def test_execute_alias_route_and_hold_with_side_override(mock_submit, mock_acct,
     )
     update_run_status(run_id, "completed")
 
-    # Call the alias route POST /api/runs/{run_id}/execute with explicit side override
+    # HOLD is absolute: even with an explicit side override, must reject.
     payload = {
         "qty": 10,
         "limit_price": 410.0,
@@ -460,12 +494,10 @@ def test_execute_alias_route_and_hold_with_side_override(mock_submit, mock_acct,
         "order_type": "limit",
     }
     res = client.post(f"/api/runs/{run_id}/execute", json=payload)
-    assert res.status_code == 200
-    data = res.json()
-    assert data["success"] is True
-    assert data["alpaca_order_id"] == "alpaca-msft-override-123"
-    assert data["symbol"] == "MSFT"
-    assert data["side"] == "buy"
+    assert res.status_code == 400
+    assert "non-actionable" in res.json()["detail"].lower() or "hold" in res.json()["detail"].lower()
+    # submit_alpaca_order must NOT have been called
+    mock_submit.assert_not_called()
 
 
 def test_card_rendering_can_execute_logic():
