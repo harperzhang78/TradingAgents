@@ -106,6 +106,8 @@ The CLI execution script `execute_order.py` shares the exact same execution modu
 | `/api/health` | GET | Healthcheck |
 | `/api/account` | GET | Alpaca account equity, cash, paper flag, and open positions |
 | `/api/positions` | GET | Open positions list |
+| `/api/symbols/search` | GET | Search symbols by ticker prefix or company name for autocomplete |
+| `/api/symbols/{symbol}` | GET | Fetch ticker details (symbol and company name) |
 | `/api/watchlist` | GET / POST | View or add watchlist symbols |
 | `/api/watchlist/{symbol}` | DELETE / PATCH | Remove or toggle active state of a symbol |
 | `/api/settings` | GET / POST | View or update auto-trade toggle and scheduler interval |

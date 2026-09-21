@@ -22,6 +22,7 @@ from webapp.db import init_db
 from webapp.scheduler import scheduler
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
 
 @asynccontextmanager
@@ -51,6 +52,17 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Anti-caching middleware for index and static assets
+    @app.middleware("http")
+    async def add_cache_control_headers(request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path == "/" or path.endswith("index.html") or path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
     # API routes
     app.include_router(api_router)
 
@@ -61,8 +73,17 @@ def create_app() -> FastAPI:
     @app.get("/", include_in_schema=False)
     async def index():
         index_file = STATIC_DIR / "index.html"
+        if not index_file.exists():
+            index_file = TEMPLATES_DIR / "index.html"
         if index_file.exists():
-            return FileResponse(index_file)
+            return FileResponse(
+                index_file,
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
         return {"message": "TradingAgents Dashboard API is running. UI not found."}
 
     return app

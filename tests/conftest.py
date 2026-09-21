@@ -1,9 +1,53 @@
-"""Shared pytest fixtures that prevent CI hangs when API keys are absent."""
-
 import os
+import tempfile
+import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+# Ensure deterministic timestamps across timezones in tests
+os.environ["TZ"] = "UTC"
+if hasattr(time, "tzset"):
+    time.tzset()
+
+# Safeguard: ensure that under no circumstances can test discovery/execution touch the live database
+_SESSION_TEST_DB_DIR = tempfile.TemporaryDirectory(prefix="tradingagents_test_db_")
+os.environ.setdefault("TRADING_DB_PATH", str(Path(_SESSION_TEST_DB_DIR.name) / "test_trading_dashboard.db"))
+
+_CLI_PREF_ENV_VARS = (
+    "TRADINGAGENTS_LLM_PROVIDER",
+    "TRADINGAGENTS_BACKEND_URL",
+    "TRADINGAGENTS_OUTPUT_LANGUAGE",
+    "TRADINGAGENTS_QUICK_THINKING_AGENT",
+    "TRADINGAGENTS_DEEP_THINKING_AGENT",
+    "TRADINGAGENTS_QUICK_THINK_LLM",
+    "TRADINGAGENTS_DEEP_THINK_LLM",
+    "TRADINGAGENTS_RESEARCH_DEPTH",
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_trading_db(tmp_path_factory, monkeypatch):
+    """Ensure every test runs against a clean, isolated temporary SQLite database."""
+    test_db_dir = tmp_path_factory.mktemp("trading_db")
+    test_db = test_db_dir / "test_trading_dashboard.db"
+    monkeypatch.setenv("TRADING_DB_PATH", str(test_db))
+
+    for k in _CLI_PREF_ENV_VARS:
+        monkeypatch.delenv(k, raising=False)
+
+    try:
+        import webapp.config as config_module
+        import webapp.db as db_module
+
+        monkeypatch.setattr(config_module, "DATABASE_PATH", test_db)
+        monkeypatch.setattr(db_module, "DATABASE_PATH", test_db)
+        db_module.init_db(test_db)
+    except ImportError:
+        pass
+
+    yield test_db
 
 
 def pytest_configure(config):

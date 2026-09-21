@@ -9,23 +9,35 @@ from pydantic import BaseModel, Field
 
 from webapp.db import (
     add_watchlist_item,
+    delete_run,
     get_all_settings,
+    get_llm_calls,
+    get_order_by_run,
     get_orders,
+    get_recommendation,
+    get_recommendation_by_run,
     get_recommendations,
     get_run,
     get_runs,
+    get_setting,
     get_watchlist,
+    has_submitted_order,
     remove_watchlist_item,
+    remove_watchlist_items,
     set_setting,
     update_watchlist_item,
 )
+from webapp import llm_settings
+from webapp.summary import summarize_run
 from webapp.execution import (
     cancel_live_order,
+    execute_recommendation,
     get_account_overview,
     get_live_order,
     get_live_orders,
 )
 from webapp.runner import runner
+from webapp.symbols import get_symbol_info, search_symbols
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +58,23 @@ class WatchlistUpdateRequest(BaseModel):
     notes: str | None = Field(default=None, description="Update notes")
 
 
+class WatchlistBatchDeleteRequest(BaseModel):
+    symbols: list[str] = Field(..., min_length=1, description="List of ticker symbols to remove")
+
+
+
 class SettingsUpdateRequest(BaseModel):
     auto_trade: bool | None = None
     schedule_enabled: bool | None = None
     schedule_interval_minutes: int | None = None
+
+
+class LLMConfigUpdateRequest(BaseModel):
+    provider: str | None = None
+    api_key: str | None = None
+    base_url: str | None = None
+    deep_model: str | None = None
+    quick_model: str | None = None
 
 
 class RunTriggerRequest(BaseModel):
@@ -57,6 +82,16 @@ class RunTriggerRequest(BaseModel):
     all_watchlist: bool = False
     trade_date: str | None = None
     from_log_path: str | None = None
+
+
+class ExecuteRecommendationRequest(BaseModel):
+    qty: int | None = Field(default=None, description="Optional custom share quantity")
+    limit_price: float | None = Field(default=None, description="Optional limit price override")
+    stop_price: float | None = Field(default=None, description="Optional stop loss price override")
+    take_profit_price: float | None = Field(default=None, description="Optional take profit price override")
+    order_type: str | None = Field(default=None, description="Optional order type: 'limit' or 'market'")
+    side: str | None = Field(default=None, description="Optional side override: 'buy' or 'sell'")
+    reexecute: bool | None = Field(default=False, description="Allow re-execution if order already submitted")
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +138,29 @@ def get_positions() -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Symbol Search & Autocomplete
+# ---------------------------------------------------------------------------
+
+@router.get("/symbols/search")
+@router.get("/symbols")
+def search_stock_symbols(
+    q: str = Query("", description="Symbol or company name search query"),
+    limit: int = Query(10, ge=1, le=50, description="Maximum number of results to return"),
+) -> list[dict[str, str]]:
+    """Search for symbols matching a partial ticker or company name."""
+    return search_symbols(query=q, limit=limit)
+
+
+@router.get("/symbols/{symbol}")
+def get_symbol_detail(symbol: str) -> dict[str, str]:
+    """Retrieve details for a single ticker symbol."""
+    info = get_symbol_info(symbol)
+    if not info:
+        raise HTTPException(status_code=404, detail=f"Symbol '{symbol}' not found")
+    return info
+
+
+# ---------------------------------------------------------------------------
 # Watchlist Management
 # ---------------------------------------------------------------------------
 
@@ -130,6 +188,18 @@ def delete_watchlist(symbol: str) -> dict[str, bool]:
     if not success:
         raise HTTPException(status_code=404, detail="Symbol not found in watchlist")
     return {"deleted": True}
+
+
+@router.post("/watchlist/batch-delete")
+@router.delete("/watchlist")
+def batch_delete_watchlist(req: WatchlistBatchDeleteRequest) -> dict[str, Any]:
+    deleted_count = remove_watchlist_items(req.symbols)
+    return {
+        "deleted": True,
+        "count": deleted_count,
+        "symbols": [s.strip().upper() for s in req.symbols if s.strip()],
+    }
+
 
 
 @router.patch("/watchlist/{symbol}")
@@ -167,6 +237,64 @@ def update_settings(req: SettingsUpdateRequest) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# LLM Provider Configuration
+# ---------------------------------------------------------------------------
+
+@router.get("/llm-config")
+def get_llm_config() -> dict[str, Any]:
+    """Return the effective LLM provider configuration (API key masked)."""
+    return llm_settings.get_llm_config_public()
+
+
+@router.post("/llm-config")
+def update_llm_config(req: LLMConfigUpdateRequest) -> dict[str, Any]:
+    """Persist LLM provider settings; a provider change rewrites the provider-scoped fields."""
+    if req.provider is not None and (req.provider == "" or req.provider in llm_settings.LLM_PROVIDERS):
+        set_setting(llm_settings.SETTING_PROVIDER, req.provider.strip())
+        # Switching provider: clear key/URL/models that belonged to the old provider.
+        for k in (llm_settings.SETTING_API_KEY, llm_settings.SETTING_BASE_URL,
+                  llm_settings.SETTING_DEEP_MODEL, llm_settings.SETTING_QUICK_MODEL):
+            if get_setting(k) is not None:
+                set_setting(k, "")
+    if req.api_key is not None:
+        set_setting(llm_settings.SETTING_API_KEY, req.api_key.strip())
+    if req.base_url is not None:
+        set_setting(llm_settings.SETTING_BASE_URL, req.base_url.strip())
+    if req.deep_model is not None:
+        set_setting(llm_settings.SETTING_DEEP_MODEL, req.deep_model.strip())
+    if req.quick_model is not None:
+        set_setting(llm_settings.SETTING_QUICK_MODEL, req.quick_model.strip())
+    return get_llm_config()
+
+
+class LLMTestRequest(BaseModel):
+    provider: str
+    api_key: str | None = None
+    base_url: str | None = None
+    model: str | None = None
+
+
+@router.post("/llm-config/test")
+def test_llm_config(req: LLMTestRequest) -> dict[str, Any]:
+    """Make one throwaway call to verify a provider/key/model combination."""
+    try:
+        api_key = req.api_key
+        if not api_key:
+            saved = llm_settings.get_llm_config()
+            if saved["provider"] == req.provider.strip().lower():
+                api_key = saved["api_key"]
+        message = llm_settings.test_connection(
+            provider=req.provider,
+            api_key=api_key,
+            base_url=req.base_url,
+            model=req.model,
+        )
+    except Exception as e:  # noqa: BLE001 - surface the provider's real error message
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"ok": True, "message": message}
+
+
+# ---------------------------------------------------------------------------
 # Runs & History
 # ---------------------------------------------------------------------------
 
@@ -183,16 +311,39 @@ def get_in_flight() -> list[str]:
     return runner.get_in_flight_tickers()
 
 
+@router.get("/runs/in-flight-detail")
+def get_in_flight_detail() -> list[dict[str, Any]]:
+    """Retrieve active in-flight runs with active LangGraph node and live LLM/tool calls."""
+    return runner.get_in_flight_details()
+
+
 @router.get("/runs/{run_id}")
 def get_run_detail(run_id: str) -> dict[str, Any]:
     run = get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     # Merge live memory logs if still running
-    mem_log = runner.get_run_memory_logs(run_id)
-    if mem_log and len(mem_log) > len(run.get("log_output", "")):
+    mem_log = runner.get_run_memory_logs(run_id) or ""
+    current_logs = run.get("log_output") or ""
+    if len(mem_log) > len(current_logs):
         run["log_output"] = mem_log
     return run
+
+
+@router.delete("/runs/{run_id}")
+def delete_run_history(run_id: str) -> dict[str, Any]:
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run["status"] == "running" or any(
+        item["run_id"] == run_id for item in runner.get_in_flight_details()
+    ):
+        raise HTTPException(status_code=400, detail="Cannot delete a running run")
+    if has_submitted_order(run_id):
+        raise HTTPException(status_code=400, detail="Cannot delete a run with a submitted order")
+    if not delete_run(run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {"deleted": True, "run_id": run_id}
 
 
 @router.get("/runs/{run_id}/logs")
@@ -200,11 +351,49 @@ def get_run_logs(run_id: str) -> dict[str, str]:
     run = get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    logs = run.get("log_output", "")
-    mem_log = runner.get_run_memory_logs(run_id)
+    logs = run.get("log_output") or ""
+    mem_log = runner.get_run_memory_logs(run_id) or ""
     if len(mem_log) > len(logs):
         logs = mem_log
     return {"logs": logs}
+
+
+@router.get("/runs/{run_id}/llm-calls")
+def get_run_llm_calls(run_id: str) -> list[dict[str, Any]]:
+    """Retrieve ordered list of captured LLM and tool calls for a run."""
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    calls = get_llm_calls(run_id)
+    if not calls:
+        calls = runner.get_run_live_calls(run_id)
+
+    return calls
+
+
+@router.get("/runs/{run_id}/summary")
+def get_run_summary(run_id: str) -> dict[str, Any]:
+    """Retrieve deterministic plain-English decision timeline and key findings for a run."""
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    calls = get_llm_calls(run_id)
+    if not calls:
+        calls = runner.get_run_live_calls(run_id)
+
+    rec = run.get("recommendation")
+    order = run.get("order")
+    try:
+        return summarize_run(run, calls, rec, order)
+    except Exception as e:
+        logger.error("Failed to generate summary for run %s: %s", run_id, e, exc_info=True)
+        return {
+            "overall": f"Analysis for {run.get('ticker', 'STOCK')}",
+            "confidence": "Neutral",
+            "steps": [],
+        }
 
 
 @router.post("/runs")
@@ -252,6 +441,77 @@ def list_orders(
     ticker: str | None = None,
 ) -> list[dict[str, Any]]:
     return get_orders(limit=limit, ticker=ticker)
+
+
+@router.post("/runs/{run_id}/execute")
+@router.post("/runs/{run_id}/execute-recommendation")
+def execute_run_recommendation(
+    run_id: str,
+    req: ExecuteRecommendationRequest | None = None,
+) -> dict[str, Any]:
+    """Submit the bracket/limit order for a run's recommendation to Alpaca."""
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+    rec = run.get("recommendation")
+    if not rec:
+        rec = get_recommendation_by_run(run_id)
+    if not rec:
+        raise HTTPException(status_code=400, detail="No recommendation found for this run")
+
+    # Prevent duplicate submission if an order was already successfully submitted
+    reexecute = bool(req and req.reexecute)
+    ord_info = run.get("order") or get_order_by_run(run_id)
+    if not reexecute and ord_info and ord_info.get("status") == "submitted":
+        alp_id = ord_info.get("alpaca_order_id") or "N/A"
+        raise HTTPException(
+            status_code=400,
+            detail=f"Order has already been submitted for this run (Alpaca Order ID: {alp_id})",
+        )
+
+    overrides = req.model_dump(exclude_none=True) if req else {}
+    try:
+        result = execute_recommendation(recommendation=rec, run_id=run_id, overrides=overrides)
+        return result
+    except ValueError as val_err:
+        raise HTTPException(status_code=400, detail=str(val_err))
+    except Exception as exc:
+        logger.error("Failed to execute recommendation for run %s: %s", run_id, exc, exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Alpaca order execution failed: {exc}")
+
+
+@router.post("/recommendations/{rec_id}/execute")
+@router.post("/recommendations/{rec_id}/execute-recommendation")
+def execute_recommendation_by_id(
+    rec_id: int,
+    req: ExecuteRecommendationRequest | None = None,
+) -> dict[str, Any]:
+    """Submit the bracket/limit order to Alpaca by recommendation ID."""
+    rec = get_recommendation(rec_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail=f"Recommendation '{rec_id}' not found")
+
+    reexecute = bool(req and req.reexecute)
+    run_id = rec.get("run_id")
+    if not reexecute and run_id:
+        ord_info = get_order_by_run(run_id)
+        if ord_info and ord_info.get("status") == "submitted":
+            alp_id = ord_info.get("alpaca_order_id") or "N/A"
+            raise HTTPException(
+                status_code=400,
+                detail=f"Order has already been submitted for this run (Alpaca Order ID: {alp_id})",
+            )
+
+    overrides = req.model_dump(exclude_none=True) if req else {}
+    try:
+        result = execute_recommendation(recommendation=rec, run_id=run_id, overrides=overrides)
+        return result
+    except ValueError as val_err:
+        raise HTTPException(status_code=400, detail=str(val_err))
+    except Exception as exc:
+        logger.error("Failed to execute recommendation %s: %s", rec_id, exc, exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Alpaca order execution failed: {exc}")
 
 
 # ---------------------------------------------------------------------------

@@ -19,9 +19,18 @@ from webapp.db import (
     create_recommendation,
     create_run,
     get_active_watchlist,
+    insert_llm_calls,
     is_auto_trade_enabled,
     update_run_status,
 )
+from tradingagents.llm_clients.llm_trace import (
+    get_captured,
+    get_current_node,
+    set_current_node,
+    start_capture,
+    stop_capture,
+)
+from webapp.llm_settings import apply_llm_config
 from webapp.execution import (
     build_order,
     fetch_last_close_price,
@@ -60,6 +69,39 @@ class AnalysisRunner:
             if info:
                 return info.get("log_buffer", "")
         return ""
+
+    def get_run_live_calls(self, run_id: str) -> list[dict[str, Any]]:
+        return get_captured(run_id=run_id)
+
+    def get_current_node(self, run_id: str) -> str | None:
+        return get_current_node(run_id=run_id)
+
+    def get_in_flight_details(self) -> list[dict[str, Any]]:
+        with self._lock:
+            active_items = list(self._active_runs.items())
+        details = []
+        for rid, info in active_items:
+            live_calls = self.get_run_live_calls(rid)
+            cur_node = self.get_current_node(rid) or "Initializing"
+            ticker_sym = info.get("ticker")
+            formatted_calls = []
+            if live_calls:
+                for c in live_calls[-10:]:
+                    c_dict = dict(c)
+                    if not c_dict.get("ticker"):
+                        c_dict["ticker"] = ticker_sym
+                    formatted_calls.append(c_dict)
+            details.append({
+                "run_id": rid,
+                "ticker": ticker_sym,
+                "trade_date": info.get("trade_date"),
+                "status": "running",
+                "current_node": cur_node,
+                "call_count": len(live_calls),
+                "latest_calls": formatted_calls,
+                "started_at": info.get("started_at"),
+            })
+        return details
 
     def start_analysis(
         self,
@@ -145,6 +187,8 @@ class AnalysisRunner:
         from_log_path: str | None = None,
     ) -> None:
         """Worker thread body executing the full analysis and auto-trade lifecycle."""
+        start_capture(run_id=run_id)
+        set_current_node("Initializing")
         try:
             self._log(run_id, f"🚀 Initializing run {run_id[:8]} for {ticker} (Date: {trade_date}, Trigger: {trigger})")
 
@@ -202,6 +246,10 @@ class AnalysisRunner:
                 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
                 config = DEFAULT_CONFIG.copy()
+                # Apply the LLM provider configured in the dashboard (takes precedence
+                # over .env / TRADINGAGENTS_* for the provider, key, and models).
+                apply_llm_config(config)
+                self._log(run_id, f"🧠 LLM provider: {config.get('llm_provider')} | deep: {config.get('deep_think_llm')} | quick: {config.get('quick_think_llm')}")
                 ta = TradingAgentsGraph(config=config)
 
                 self._log(run_id, "🤖 Executing agent consensus debate and risk management...")
@@ -249,37 +297,43 @@ class AnalysisRunner:
             auto_trade = is_auto_trade_enabled()
             self._log(run_id, f"⚙️ Auto-trade toggle is currently: {'ENABLED (LIVE/PAPER SUBMISSION)' if auto_trade else 'DISABLED (ADVISORY ONLY)'}")
 
-            # Fetch reference price if needed
-            current_market_price = fetch_last_close_price(ticker) if client else None
-            order_spec = build_order(ticker, decision, account_equity, current_market_price)
-
-            if order_spec is None:
-                skip_msg = f"No order generated: Action '{action}' / Rating '{rating}' evaluated to HOLD/REVIEW."
-                self._log(run_id, f"⏸️ {skip_msg}")
-                create_order_record(
-                    run_id=run_id,
-                    recommendation_id=rec_id,
-                    ticker=ticker,
-                    side=action.lower() if action in ("BUY", "SELL") else "hold",
-                    order_type="none",
-                    qty=None,
-                    notional=None,
-                    limit_price=None,
-                    stop_price=None,
-                    take_profit_price=None,
-                    status="skipped",
-                    skip_reason=skip_msg,
-                )
+            if not auto_trade:
+                # Advisory Mode active: Run remains in Advisory state, no order records created/generated
+                self._log(run_id, "ℹ️ Advisory Mode active: Auto-trade is OFF. Run remains in Advisory state (no order records generated).")
+                completed_at = datetime.now(timezone.utc).isoformat()
+                update_run_status(run_id, "advisory", completed_at=completed_at)
+                self._log(run_id, "🎉 Advisory analysis completed successfully.")
             else:
-                self._log(
-                    run_id,
-                    f"📦 Order specification: {order_spec['side'].upper()} {order_spec['symbol']} "
-                    f"Type={order_spec['otype']}, Qty={order_spec.get('qty')}, "
-                    f"Limit=${order_spec.get('limit_price') or 0:.2f}, Stop=${order_spec.get('stop_price') or 0:.2f}, "
-                    f"Target=${order_spec.get('take_profit_price') or 0:.2f}",
-                )
+                # Fetch reference price if needed
+                current_market_price = fetch_last_close_price(ticker) if client else None
+                order_spec = build_order(ticker, decision, account_equity, current_market_price)
 
-                if auto_trade:
+                if order_spec is None:
+                    skip_msg = f"No order generated: Action '{action}' / Rating '{rating}' evaluated to HOLD/REVIEW."
+                    self._log(run_id, f"⏸️ {skip_msg}")
+                    create_order_record(
+                        run_id=run_id,
+                        recommendation_id=rec_id,
+                        ticker=ticker,
+                        side=action.lower() if action in ("BUY", "SELL") else "hold",
+                        order_type="none",
+                        qty=None,
+                        notional=None,
+                        limit_price=None,
+                        stop_price=None,
+                        take_profit_price=None,
+                        status="skipped",
+                        skip_reason=skip_msg,
+                    )
+                else:
+                    self._log(
+                        run_id,
+                        f"📦 Order specification: {order_spec['side'].upper()} {order_spec['symbol']} "
+                        f"Type={order_spec['otype']}, Qty={order_spec.get('qty')}, "
+                        f"Limit=${order_spec.get('limit_price') or 0:.2f}, Stop=${order_spec.get('stop_price') or 0:.2f}, "
+                        f"Target=${order_spec.get('take_profit_price') or 0:.2f}",
+                    )
+
                     if client is None:
                         client = get_alpaca_trading_client()
                     self._log(run_id, "🚀 Submitting order to Alpaca...")
@@ -319,27 +373,10 @@ class AnalysisRunner:
                             status="failed",
                             error_message=err_str,
                         )
-                else:
-                    skip_reason = "Order NOT submitted: Auto-trade is toggled OFF (Advisory Mode)."
-                    self._log(run_id, f"ℹ️ {skip_reason}")
-                    create_order_record(
-                        run_id=run_id,
-                        recommendation_id=rec_id,
-                        ticker=ticker,
-                        side=order_spec["side"],
-                        order_type=order_spec["otype"],
-                        qty=order_spec.get("qty"),
-                        notional=order_spec.get("notional"),
-                        limit_price=order_spec.get("limit_price"),
-                        stop_price=order_spec.get("stop_price"),
-                        take_profit_price=order_spec.get("take_profit_price"),
-                        status="skipped",
-                        skip_reason=skip_reason,
-                    )
 
-            completed_at = datetime.now(timezone.utc).isoformat()
-            update_run_status(run_id, "completed", completed_at=completed_at)
-            self._log(run_id, "🎉 Analysis completed successfully.")
+                completed_at = datetime.now(timezone.utc).isoformat()
+                update_run_status(run_id, "completed", completed_at=completed_at)
+                self._log(run_id, "🎉 Analysis completed successfully.")
 
         except Exception as exc:
             tb = traceback.format_exc()
@@ -347,6 +384,14 @@ class AnalysisRunner:
             completed_at = datetime.now(timezone.utc).isoformat()
             update_run_status(run_id, "failed", completed_at=completed_at, error=str(exc))
         finally:
+            try:
+                captured = get_captured(run_id=run_id)
+                stop_capture()
+                if captured:
+                    insert_llm_calls(run_id, captured)
+                    self._log(run_id, f"💾 Persisted {len(captured)} LLM & tool calls to database.")
+            except Exception as capture_err:
+                logger.error("Failed to persist captured LLM calls for run %s: %s", run_id, capture_err)
             with self._lock:
                 self._in_flight_tickers.discard(ticker)
                 self._active_runs.pop(run_id, None)

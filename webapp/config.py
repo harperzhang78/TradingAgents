@@ -18,7 +18,15 @@ WEBAPP_DIR = PROJECT_ROOT / "webapp"
 DATA_DIR = WEBAPP_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-DATABASE_PATH = DATA_DIR / "trading_dashboard.db"
+def get_database_path() -> Path:
+    """Return the configured SQLite database path, supporting TRADING_DB_PATH override."""
+    override = os.environ.get("TRADING_DB_PATH")
+    if override:
+        return Path(override)
+    return DATA_DIR / "trading_dashboard.db"
+
+
+DATABASE_PATH = get_database_path()
 
 # Alpaca configuration
 ALPACA_API_KEY = os.environ.get("ALPACA_API_KEY", "")

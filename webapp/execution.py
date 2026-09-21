@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -585,6 +585,237 @@ def cancel_live_order(order_id: str, client: TradingClient | None = None) -> boo
     if not called:
         raise AttributeError("TradingClient has no order cancel method")
     return True
+
+
+# ---------------------------------------------------------------------------
+# Recommendation Execution Bridge (Web App / API)
+# ---------------------------------------------------------------------------
+
+def execute_recommendation(
+    recommendation: dict[str, Any],
+    run_id: str | None = None,
+    overrides: dict[str, Any] | None = None,
+    client: TradingClient | None = None,
+) -> dict[str, Any]:
+    """Execute a recommendation by submitting a bracket/limit order to Alpaca.
+
+    Parameters:
+      recommendation: dict representing a recommendation row from the DB.
+      run_id: optional run ID to link order and log output.
+      overrides: optional dict with user adjustments (qty, limit_price, stop_price,
+                 take_profit_price, order_type, side).
+      client: optional pre-configured Alpaca TradingClient.
+
+    Returns:
+      dict with execution outcome details.
+    """
+    from webapp.db import append_run_log, get_order_by_run, record_order_execution
+
+    overrides = overrides or {}
+    ticker = (recommendation.get("ticker") or "").strip().upper()
+    if not ticker:
+        raise ValueError("Recommendation does not have a valid ticker symbol")
+
+    action = (recommendation.get("action") or "").strip().upper()
+    rating = (recommendation.get("rating") or "").strip().upper()
+
+    # Determine side (explicit override takes precedence)
+    if overrides.get("side"):
+        side = overrides["side"].strip().lower()
+    elif action == "BUY":
+        side = "buy"
+    elif action == "SELL":
+        side = "sell"
+    elif not action and rating in ("BUY", "OVERWEIGHT"):
+        side = "buy"
+    elif not action and rating in ("SELL", "UNDERWEIGHT"):
+        side = "sell"
+    else:
+        raise ValueError(
+            f"Cannot execute order: recommendation action '{action or rating}' is non-actionable (HOLD/REVIEW)"
+        )
+
+    # Initialize Alpaca client
+    if client is None:
+        client = get_alpaca_trading_client()
+
+    acct_info = get_account_overview(client)
+    account_equity = float(acct_info.get("equity", 100000.0))
+
+    actual_run_id = run_id or recommendation.get("run_id")
+
+    # Check if there is an existing order record in DB for this run
+    existing_order = None
+    if actual_run_id:
+        existing_order = get_order_by_run(actual_run_id)
+
+    # Build decision dict
+    decision = {
+        "action": action,
+        "rating": rating,
+        "entry_price": recommendation.get("entry_price"),
+        "stop_loss": recommendation.get("stop_loss"),
+        "price_target": recommendation.get("price_target"),
+        "position_sizing": recommendation.get("position_sizing"),
+        "reasoning": recommendation.get("reasoning"),
+    }
+
+    current_price = fetch_last_close_price(ticker)
+    built_spec = build_order(ticker, decision, account_equity, current_price)
+
+    # Start with built spec or create baseline
+    if built_spec is not None:
+        order_spec = built_spec.copy()
+    else:
+        ref_price = recommendation.get("entry_price") or current_price or 100.0
+        notional = parse_position_sizing(recommendation.get("position_sizing"), account_equity)
+        qty = max(1, int(notional / ref_price)) if ref_price > 0 else 1
+        order_spec = {
+            "symbol": ticker,
+            "side": side,
+            "otype": "limit",
+            "limit_price": ref_price,
+            "qty": qty,
+            "notional": None,
+            "stop_price": recommendation.get("stop_loss"),
+            "take_profit_price": recommendation.get("price_target"),
+        }
+
+    # If existing order record had specific quantities or prices and built spec defaulted, use existing
+    if existing_order:
+        if existing_order.get("qty") and not overrides.get("qty"):
+            order_spec["qty"] = existing_order["qty"]
+        if existing_order.get("limit_price") and not overrides.get("limit_price"):
+            order_spec["limit_price"] = existing_order["limit_price"]
+        if existing_order.get("stop_price") and not overrides.get("stop_price"):
+            order_spec["stop_price"] = existing_order["stop_price"]
+        if existing_order.get("take_profit_price") and not overrides.get("take_profit_price"):
+            order_spec["take_profit_price"] = existing_order["take_profit_price"]
+
+    # Apply overrides
+    if overrides.get("qty") is not None:
+        order_spec["qty"] = int(overrides["qty"])
+    if overrides.get("limit_price") is not None:
+        order_spec["limit_price"] = float(overrides["limit_price"])
+    if overrides.get("stop_price") is not None:
+        order_spec["stop_price"] = float(overrides["stop_price"])
+    if overrides.get("take_profit_price") is not None:
+        order_spec["take_profit_price"] = float(overrides["take_profit_price"])
+    if overrides.get("order_type") is not None:
+        order_spec["otype"] = str(overrides["order_type"]).lower()
+    if overrides.get("side") is not None:
+        order_spec["side"] = str(overrides["side"]).lower()
+
+    # Validate limit order requirements
+    if order_spec["otype"] == "limit":
+        if not order_spec.get("limit_price"):
+            order_spec["limit_price"] = recommendation.get("entry_price") or current_price or 100.0
+        if not order_spec.get("qty") or order_spec["qty"] <= 0:
+            ref_p = order_spec.get("limit_price") or 100.0
+            order_spec["qty"] = max(1, int((account_equity * 0.05) / ref_p))
+
+        # Re-validate bracket pricing consistency
+        ref_p = float(order_spec["limit_price"])
+        st = float(order_spec["stop_price"]) if order_spec.get("stop_price") is not None else None
+        tp = float(order_spec["take_profit_price"]) if order_spec.get("take_profit_price") is not None else None
+
+        if order_spec["side"] == "buy":
+            if st is not None and tp is not None and st > ref_p and tp < ref_p:
+                st, tp = tp, st
+            if st is not None and (st >= ref_p or st <= 0):
+                st = round(ref_p * 0.93, 2)
+            if tp is not None and tp <= ref_p:
+                tp = round(ref_p * 1.20, 2)
+        else:  # sell
+            if st is not None and tp is not None and st < ref_p and tp > ref_p:
+                st, tp = tp, st
+            if st is not None and st <= ref_p:
+                st = round(ref_p * 1.07, 2)
+            if tp is not None and (tp >= ref_p or tp <= 0):
+                tp = round(ref_p * 0.80, 2)
+
+        order_spec["stop_price"] = st
+        order_spec["take_profit_price"] = tp
+
+    # Submit to Alpaca
+    rec_id = recommendation.get("id")
+
+    try:
+        submitted = submit_alpaca_order(order_spec, client=client)
+    except Exception as exc:
+        err_msg = str(exc)
+        logger.error("Alpaca submission failed for rec %s: %s", rec_id, err_msg)
+        if actual_run_id:
+            now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            append_run_log(actual_run_id, f"[{now_str}] ❌ Manual order submission failed: {err_msg}\n")
+            record_order_execution(
+                run_id=actual_run_id,
+                recommendation_id=rec_id,
+                ticker=order_spec["symbol"],
+                side=order_spec["side"],
+                order_type=order_spec["otype"],
+                qty=order_spec.get("qty"),
+                notional=order_spec.get("notional"),
+                limit_price=order_spec.get("limit_price"),
+                stop_price=order_spec.get("stop_price"),
+                take_profit_price=order_spec.get("take_profit_price"),
+                status="failed",
+                error_message=err_msg,
+            )
+        raise
+
+    # Submission succeeded: record in DB
+    order_db_id = None
+    if actual_run_id:
+        now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        append_run_log(
+            actual_run_id,
+            f"[{now_str}] ⚡ Manual execution confirmed: Submitted {order_spec['side'].upper()} "
+            f"{order_spec.get('qty')} shs @ ${order_spec.get('limit_price') or 0:.2f} "
+            f"to Alpaca (Order ID: {submitted.get('id')})\n",
+        )
+        order_db_id = record_order_execution(
+            run_id=actual_run_id,
+            recommendation_id=rec_id,
+            ticker=order_spec["symbol"],
+            side=order_spec["side"],
+            order_type=order_spec["otype"],
+            qty=order_spec.get("qty"),
+            notional=order_spec.get("notional"),
+            limit_price=order_spec.get("limit_price"),
+            stop_price=order_spec.get("stop_price"),
+            take_profit_price=order_spec.get("take_profit_price"),
+            status="submitted",
+            alpaca_order_id=submitted.get("id"),
+            client_order_id=submitted.get("client_order_id"),
+            raw_response=submitted,
+        )
+        try:
+            from webapp.db import update_run_status
+            update_run_status(actual_run_id, "completed")
+        except Exception as e:
+            logger.warning("Could not update run status to completed for run %s: %s", actual_run_id, e)
+
+    return {
+        "success": True,
+        "run_id": actual_run_id,
+        "recommendation_id": rec_id,
+        "order_id": order_db_id,
+        "alpaca_order_id": submitted.get("id"),
+        "client_order_id": submitted.get("client_order_id"),
+        "status": submitted.get("status"),
+        "symbol": order_spec["symbol"],
+        "side": order_spec["side"],
+        "qty": order_spec.get("qty"),
+        "limit_price": order_spec.get("limit_price"),
+        "stop_price": order_spec.get("stop_price"),
+        "take_profit_price": order_spec.get("take_profit_price"),
+        "order_type": order_spec["otype"],
+        "message": (
+            f"Successfully submitted {order_spec['side'].upper()} order for "
+            f"{order_spec.get('qty')} {order_spec['symbol']} to Alpaca"
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------

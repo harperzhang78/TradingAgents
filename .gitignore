@@ -60,7 +60,11 @@ cover/
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
-webapp/data/
+webapp/data/*.db
+webapp/data/*.db-wal
+webapp/data/*.db-shm
+webapp/data/*.db-journal
+!webapp/data/symbols.json
 *.db
 
 # Flask stuff:

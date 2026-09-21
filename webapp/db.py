@@ -7,21 +7,43 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Generator
 
+import os
+from pathlib import Path
+
 from webapp.config import (
     DATABASE_PATH,
     DEFAULT_AUTO_TRADE,
     DEFAULT_SCHEDULE_ENABLED,
     DEFAULT_SCHEDULE_INTERVAL_MINUTES,
     DEFAULT_WATCHLIST,
+    get_database_path,
 )
 
 
+def get_db_path() -> Path | str:
+    """Return the active database path, allowing dynamic override via env or module attribute."""
+    override = os.environ.get("TRADING_DB_PATH")
+    if override:
+        return override
+    import webapp.db as db_mod
+    if hasattr(db_mod, "DATABASE_PATH") and db_mod.DATABASE_PATH is not None:
+        return db_mod.DATABASE_PATH
+    return get_database_path()
+
+
 @contextlib.contextmanager
-def get_db() -> Generator[sqlite3.Connection, None, None]:
+def get_db(db_path: Path | str | None = None) -> Generator[sqlite3.Connection, None, None]:
     """Provide a transactional scope around a series of operations."""
-    conn = sqlite3.connect(str(DATABASE_PATH), timeout=30.0)
+    target_path = db_path if db_path is not None else get_db_path()
+    target_str = str(target_path)
+    is_uri = target_str.startswith("file:")
+    if not is_uri and target_str != ":memory:":
+        Path(target_str).parent.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(target_str, timeout=30.0, uri=is_uri)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
+    if target_str != ":memory:" and not is_uri:
+        conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
     try:
         yield conn
@@ -33,9 +55,9 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
         conn.close()
 
 
-def init_db() -> None:
+def init_db(db_path: Path | str | None = None) -> None:
     """Initialize database tables and default configuration."""
-    with get_db() as conn:
+    with get_db(db_path) as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS watchlist (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,6 +123,26 @@ def init_db() -> None:
             submitted_at TEXT NOT NULL,
             raw_response TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS llm_calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+            seq INTEGER NOT NULL,
+            node TEXT,
+            agent TEXT,
+            kind TEXT,
+            model TEXT,
+            tier TEXT,
+            tool_name TEXT,
+            request TEXT,
+            response TEXT,
+            ok INTEGER NOT NULL DEFAULT 1,
+            latency_ms INTEGER DEFAULT 0,
+            error TEXT,
+            ts TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_llm_calls_run_seq ON llm_calls(run_id, seq);
         """)
 
         # Initialize default settings if missing
@@ -123,6 +165,19 @@ def init_db() -> None:
                     "INSERT OR IGNORE INTO watchlist (symbol, enabled, added_at, notes) VALUES (?, 1, ?, ?)",
                     (symbol.upper(), now_str, "Default watchlist entry"),
                 )
+
+        # Mark any stale runs that were running when the server shut down as failed/interrupted
+        now_iso = datetime.now(timezone.utc).isoformat()
+        cur.execute(
+            """
+            UPDATE runs
+            SET status = 'failed',
+                completed_at = ?,
+                error = 'Run interrupted: server restarted while execution was in progress'
+            WHERE status = 'running'
+            """,
+            (now_iso,),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +216,17 @@ def remove_watchlist_item(symbol: str) -> bool:
     with get_db() as conn:
         cur = conn.execute("DELETE FROM watchlist WHERE symbol = ?", (clean_sym,))
         return cur.rowcount > 0
+
+
+def remove_watchlist_items(symbols: list[str]) -> int:
+    clean_syms = [s.strip().upper() for s in symbols if isinstance(s, str) and s.strip()]
+    if not clean_syms:
+        return 0
+    with get_db() as conn:
+        placeholders = ",".join("?" for _ in clean_syms)
+        cur = conn.execute(f"DELETE FROM watchlist WHERE symbol IN ({placeholders})", clean_syms)
+        return cur.rowcount
+
 
 
 def update_watchlist_item(symbol: str, enabled: bool | None = None, notes: str | None = None) -> dict[str, Any] | None:
@@ -245,15 +311,29 @@ def append_run_log(run_id: str, text: str) -> None:
         )
 
 
+def delete_run(run_id: str) -> bool:
+    """Delete a run and its children through the enabled foreign-key cascades."""
+    with get_db() as conn:
+        return conn.execute("DELETE FROM runs WHERE id = ?", (run_id,)).rowcount > 0
+
+
+def has_submitted_order(run_id: str) -> bool:
+    with get_db() as conn:
+        return conn.execute(
+            "SELECT 1 FROM orders WHERE run_id = ? AND status = 'submitted' LIMIT 1",
+            (run_id,),
+        ).fetchone() is not None
+
+
 def get_run(run_id: str) -> dict[str, Any] | None:
     with get_db() as conn:
         row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
         if not row:
             return None
         data = dict(row)
-        rec = conn.execute("SELECT * FROM recommendations WHERE run_id = ?", (run_id,)).fetchone()
+        rec = conn.execute("SELECT * FROM recommendations WHERE run_id = ? ORDER BY id DESC LIMIT 1", (run_id,)).fetchone()
         data["recommendation"] = dict(rec) if rec else None
-        ord_row = conn.execute("SELECT * FROM orders WHERE run_id = ?", (run_id,)).fetchone()
+        ord_row = conn.execute("SELECT * FROM orders WHERE run_id = ? ORDER BY id DESC LIMIT 1", (run_id,)).fetchone()
         data["order"] = dict(ord_row) if ord_row else None
         return data
 
@@ -274,9 +354,9 @@ def get_runs(limit: int = 50, ticker: str | None = None) -> list[dict[str, Any]]
         results = []
         for r in rows:
             d = dict(r)
-            rec = conn.execute("SELECT * FROM recommendations WHERE run_id = ?", (d["id"],)).fetchone()
+            rec = conn.execute("SELECT * FROM recommendations WHERE run_id = ? ORDER BY id DESC LIMIT 1", (d["id"],)).fetchone()
             d["recommendation"] = dict(rec) if rec else None
-            ord_row = conn.execute("SELECT * FROM orders WHERE run_id = ?", (d["id"],)).fetchone()
+            ord_row = conn.execute("SELECT * FROM orders WHERE run_id = ? ORDER BY id DESC LIMIT 1", (d["id"],)).fetchone()
             d["order"] = dict(ord_row) if ord_row else None
             results.append(d)
         return results
@@ -349,6 +429,24 @@ def get_recommendations(limit: int = 50, ticker: str | None = None) -> list[dict
         return [dict(r) for r in rows]
 
 
+def get_recommendation(recommendation_id: int) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM recommendations WHERE id = ?",
+            (recommendation_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_recommendation_by_run(run_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM recommendations WHERE run_id = ? ORDER BY id DESC LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 # ---------------------------------------------------------------------------
 # Orders Queries
 # ---------------------------------------------------------------------------
@@ -419,3 +517,193 @@ def get_orders(limit: int = 50, ticker: str | None = None) -> list[dict[str, Any
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_order_by_run(run_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM orders WHERE run_id = ? ORDER BY id DESC LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def record_order_execution(
+    run_id: str,
+    recommendation_id: int | None,
+    ticker: str,
+    side: str,
+    order_type: str,
+    qty: int | None,
+    notional: float | None,
+    limit_price: float | None,
+    stop_price: float | None,
+    take_profit_price: float | None,
+    status: str,
+    alpaca_order_id: str | None = None,
+    client_order_id: str | None = None,
+    skip_reason: str | None = None,
+    error_message: str | None = None,
+    raw_response: dict | None = None,
+) -> int:
+    """Record or update an order execution in the database."""
+    now_str = datetime.now(timezone.utc).isoformat()
+    raw_str = json.dumps(raw_response, default=str) if raw_response else None
+    with get_db() as conn:
+        # Check if an existing order record for this run was skipped or failed
+        existing = conn.execute(
+            "SELECT id FROM orders WHERE run_id = ? AND status IN ('skipped', 'failed') ORDER BY id DESC LIMIT 1",
+            (run_id,),
+        ).fetchone()
+
+        if existing:
+            order_id = existing["id"]
+            conn.execute(
+                """
+                UPDATE orders SET
+                    recommendation_id = COALESCE(?, recommendation_id),
+                    ticker = ?,
+                    side = ?,
+                    order_type = ?,
+                    qty = ?,
+                    notional = ?,
+                    limit_price = ?,
+                    stop_price = ?,
+                    take_profit_price = ?,
+                    status = ?,
+                    alpaca_order_id = ?,
+                    client_order_id = ?,
+                    skip_reason = ?,
+                    error_message = ?,
+                    submitted_at = ?,
+                    raw_response = ?
+                WHERE id = ?
+                """,
+                (
+                    recommendation_id,
+                    ticker.strip().upper(),
+                    side,
+                    order_type,
+                    qty,
+                    notional,
+                    limit_price,
+                    stop_price,
+                    take_profit_price,
+                    status,
+                    alpaca_order_id,
+                    client_order_id,
+                    skip_reason,
+                    error_message,
+                    now_str,
+                    raw_str,
+                    order_id,
+                ),
+            )
+            return order_id
+        else:
+            cur = conn.execute(
+                """
+                INSERT INTO orders (
+                    run_id, recommendation_id, ticker, side, order_type,
+                    qty, notional, limit_price, stop_price, take_profit_price,
+                    status, alpaca_order_id, client_order_id, skip_reason,
+                    error_message, submitted_at, raw_response
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    recommendation_id,
+                    ticker.strip().upper(),
+                    side,
+                    order_type,
+                    qty,
+                    notional,
+                    limit_price,
+                    stop_price,
+                    take_profit_price,
+                    status,
+                    alpaca_order_id,
+                    client_order_id,
+                    skip_reason,
+                    error_message,
+                    now_str,
+                    raw_str,
+                ),
+            )
+            return cur.lastrowid
+
+
+# ---------------------------------------------------------------------------
+# LLM Calls Queries
+# ---------------------------------------------------------------------------
+
+def insert_llm_calls(run_id: str, calls: list[dict[str, Any]]) -> None:
+    """Batch insert captured LLM and tool calls for a run."""
+    if not calls:
+        return
+    with get_db() as conn:
+        for c in calls:
+            req_raw = c.get("request")
+            if isinstance(req_raw, (dict, list)):
+                req_str = json.dumps(req_raw, default=str)
+            else:
+                req_str = str(req_raw) if req_raw is not None else None
+
+            resp_raw = c.get("response")
+            if isinstance(resp_raw, (dict, list)):
+                resp_str = json.dumps(resp_raw, default=str)
+            else:
+                resp_str = str(resp_raw) if resp_raw is not None else None
+
+            conn.execute(
+                """
+                INSERT INTO llm_calls (
+                    run_id, seq, node, agent, kind, model, tier,
+                    tool_name, request, response, ok, latency_ms, error, ts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    c.get("seq", 0),
+                    c.get("node"),
+                    c.get("agent"),
+                    c.get("kind", "llm"),
+                    c.get("model"),
+                    c.get("tier"),
+                    c.get("tool_name"),
+                    req_str,
+                    resp_str,
+                    1 if c.get("ok", True) else 0,
+                    c.get("latency_ms", 0),
+                    c.get("error"),
+                    c.get("ts"),
+                ),
+            )
+
+
+def get_llm_calls(run_id: str) -> list[dict[str, Any]]:
+    """Retrieve all LLM and tool calls for a run, ordered by sequence number."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM llm_calls WHERE run_id = ? ORDER BY seq ASC",
+            (run_id,),
+        ).fetchall()
+        results = []
+        for r in rows:
+            d = dict(r)
+            d["ok"] = bool(d["ok"])
+
+            if d.get("request") and (d["request"].startswith("{") or d["request"].startswith("[")):
+                try:
+                    d["request"] = json.loads(d["request"])
+                except Exception:
+                    pass
+
+            if d.get("response") and (d["response"].startswith("{") or d["response"].startswith("[")):
+                try:
+                    d["response"] = json.loads(d["response"])
+                except Exception:
+                    pass
+
+            results.append(d)
+        return results
