@@ -178,8 +178,10 @@ def test_get_stock_quote_two_bars():
 
 
 def test_get_stock_quote_one_bar():
-    """Mocked Alpaca client returning 1 bar returns current_price with prev_close & change_pct as None."""
+    """With only 1 bar (Alpaca free/paper tier), prev_close is approximated from
+    that bar's opening price so change_pct is still available."""
     mock_bar1 = MagicMock()
+    mock_bar1.open = 145.0
     mock_bar1.close = 150.0
 
     mock_client = MagicMock()
@@ -190,8 +192,9 @@ def test_get_stock_quote_one_bar():
     assert quote is not None
     assert quote["symbol"] == "MSFT"
     assert quote["current_price"] == 150.0
-    assert quote["prev_close"] is None
-    assert quote["change_pct"] is None
+    # Fallback: single bar → prev_close is the bar's open price
+    assert quote["prev_close"] == 145.0
+    assert quote["change_pct"] == pytest.approx((150.0 - 145.0) / 145.0 * 100.0, abs=0.0001)
 
 
 def test_get_stock_quote_api_error():

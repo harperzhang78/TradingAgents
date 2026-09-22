@@ -163,22 +163,21 @@ def get_stock_quote(symbol: str, client: Any = None) -> dict[str, Any] | None:
 
         current_price: float | None = None
 
-        # Fetch recent daily bars for previous close and fallback current price
+        # Fetch recent daily bars for previous close and fallback current price.
+        # NOTE: alpaca-py BarSet.__contains__ is broken (always False), so we skip
+        # the `sym in resp` check and go directly to resp.data dict.
         bars = None
         try:
-            req = StockBarsRequest(symbol_or_symbols=sym, timeframe=TimeFrame.Day, limit=3)
+            req = StockBarsRequest(symbol_or_symbols=sym, timeframe=TimeFrame.Day, limit=5)
             bars_resp = client.get_stock_bars(req)
             if bars_resp is not None:
-                if hasattr(bars_resp, "__getitem__"):
+                if hasattr(bars_resp, "data") and isinstance(bars_resp.data, dict):
+                    bars = bars_resp.data.get(sym) or bars_resp.data.get(symbol)
+                if bars is None and hasattr(bars_resp, "__getitem__"):
                     try:
-                        if sym in bars_resp:
-                            bars = bars_resp[sym]
-                        elif symbol in bars_resp:
-                            bars = bars_resp[symbol]
+                        bars = bars_resp[sym]
                     except Exception:
                         pass
-                if bars is None and hasattr(bars_resp, "data") and isinstance(bars_resp.data, dict):
-                    bars = bars_resp.data.get(sym) or bars_resp.data.get(symbol)
                 if bars is None and isinstance(bars_resp, dict):
                     bars = bars_resp.get(sym) or bars_resp.get(symbol)
         except Exception as e:
@@ -207,6 +206,29 @@ def get_stock_quote(symbol: str, client: Any = None) -> dict[str, Any] | None:
         prev_close: float | None = None
         if bars and len(bars) >= 2:
             prev_close = _extract_close(bars[-2])
+        elif bars and len(bars) == 1:
+            # Alpaca free/paper tier may return only today's bar.
+            # Approximate prev_close using today's opening price (close to
+            # yesterday's close, with a small gap for after-hours move).
+            b = bars[-1]
+            prev_close = None
+            for attr in ("open", "o"):
+                val = getattr(b, attr, None) if not isinstance(b, dict) else b.get(attr)
+                if val is not None:
+                    try:
+                        prev_close = float(val)
+                        break
+                    except (ValueError, TypeError):
+                        pass
+            if prev_close is None and isinstance(b, dict):
+                for key in ("open", "o"):
+                    val = b.get(key)
+                    if val is not None:
+                        try:
+                            prev_close = float(val)
+                            break
+                        except (ValueError, TypeError):
+                            pass
 
         # Attempt to get latest trade price first
         try:
