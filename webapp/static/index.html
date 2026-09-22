@@ -370,7 +370,15 @@
         </div>
 
         <div class="form-group mt-3">
-          <label class="form-label" for="settings-interval">Analysis Frequency</label>
+          <label class="form-label" for="settings-lang">Language / 输出语言 (Lang: en / zh)</label>
+          <div class="form-desc">
+            Select language for agent analysis, decision generation, rationales, and summary outputs. In Chinese (zh) mode, all generated decisions and rationales are produced in Chinese.
+          </div>
+          <select id="settings-lang" class="form-select">
+            <option value="en" selected>English (en)</option>
+            <option value="zh">Chinese / 中文 (zh)</option>
+          </select>
+        </div>
           <select id="settings-interval" class="form-select">
             <option value="60">Every 1 Hour</option>
             <option value="240">Every 4 Hours</option>
