@@ -344,8 +344,8 @@ def build_order(
       qty (int, for limit), stop_price (float, optional),
       take_profit_price (float, optional)
     """
-    action = (decision.get("action") or "").upper()
-    rating = (decision.get("rating") or "").upper()
+    action = (decision.get("action") or "").strip().upper()
+    rating = (decision.get("rating") or "").strip().upper()
 
     # Determine direction: trader's action is primary, PM rating is fallback
     direction = None
@@ -353,14 +353,27 @@ def build_order(
         direction = "buy"
     elif action == "SELL":
         direction = "sell"
-    elif action in ("HOLD", ""):
-        # Trader held or gave no action → fall back to PM rating
+    elif action in ("HOLD", "REVIEW"):
+        # Trader explicitly decided HOLD or REVIEW: must NEVER generate an order regardless of PM rating
+        if rating in ("BUY", "OVERWEIGHT", "SELL", "UNDERWEIGHT"):
+            logger.warning(
+                "⚠️ 冲突：Trader Action=%s 但 PM Rating=%s — 以 Trader 的 %s 为准，未下单（无持仓，避免入场）。",
+                action,
+                rating,
+                action,
+            )
+        return None
+    elif not action:
+        # Trader gave no action (empty/missing) → fall back to PM rating
         if rating in ("BUY", "OVERWEIGHT"):
             direction = "buy"
         elif rating in ("SELL", "UNDERWEIGHT"):
             direction = "sell"
-        elif rating in ("HOLD", "REVIEW", ""):
+        elif rating in ("HOLD", "REVIEW", "NEUTRAL", ""):
             return None
+    else:
+        return None
+
     if direction is None:
         return None
 
@@ -743,14 +756,18 @@ def execute_recommendation(
 
     # Determine side — HOLD/REVIEW is absolute: reject immediately regardless of overrides.
     _is_non_actionable = (
-        action in ("HOLD", "REVIEW", "")
-        and rating in ("HOLD", "REVIEW", "NEUTRAL", "")
+        action in ("HOLD", "REVIEW")
+        or (not action and rating in ("HOLD", "REVIEW", "NEUTRAL", ""))
     )
     if _is_non_actionable:
-        raise ValueError(
-            f"Cannot execute order: recommendation is '{rating or 'HOLD'}' (non-actionable). "
+        detail_msg = (
+            f"Cannot execute order: Trader Action is '{action}' (HOLD/REVIEW). "
+            f"Trader's explicit hold decision takes precedence over PM rating '{rating}'."
+            if action in ("HOLD", "REVIEW")
+            else f"Cannot execute order: recommendation is '{rating or 'HOLD'}' (non-actionable). "
             f"A HOLD/REVIEW rating cannot be converted to a trade."
         )
+        raise ValueError(detail_msg)
 
     # For actionable ratings, an explicit side override takes precedence
     if overrides.get("side"):

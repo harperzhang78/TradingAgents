@@ -30,7 +30,7 @@ from webapp.db import (
     update_watchlist_item,
 )
 from webapp import llm_settings
-from webapp.summary import summarize_run
+from webapp.summary import build_run_rationale_context, summarize_run
 from webapp.execution import (
     cancel_live_order,
     execute_recommendation,
@@ -98,6 +98,11 @@ class ExecuteRecommendationRequest(BaseModel):
     order_type: str | None = Field(default=None, description="Optional order type: 'limit' or 'market'")
     side: str | None = Field(default=None, description="Optional side override: 'buy' or 'sell'")
     reexecute: bool | None = Field(default=False, description="Allow re-execution if order already submitted")
+
+
+class AskRunQuestionRequest(BaseModel):
+    question: str = Field(..., min_length=1, description="Question about the run's decision rationale")
+
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +509,130 @@ def get_run_summary(run_id: str) -> dict[str, Any]:
             "confidence": "Neutral",
             "steps": [],
         }
+
+
+@router.post("/runs/{run_id}/ask")
+def ask_run_question(run_id: str, req: AskRunQuestionRequest) -> dict[str, Any]:
+    """Answer natural language questions about a run's decision rationale and agent deliberation."""
+    question = (req.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Question must not be empty")
+
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+    calls = get_llm_calls(run_id)
+    if not calls:
+        calls = runner.get_run_live_calls(run_id)
+
+    rec = run.get("recommendation") or get_recommendation_by_run(run_id) or {}
+    order = run.get("order") or get_order_by_run(run_id) or {}
+
+    try:
+        summary = summarize_run(run, calls, rec, order)
+    except Exception as e:
+        logger.warning("Could not summarize run %s: %s", run_id, e)
+        summary = {
+            "overall": f"Analysis for {run.get('ticker', 'STOCK')}",
+            "confidence": "Neutral",
+            "steps": [],
+        }
+
+    context = build_run_rationale_context(run, summary, rec, order, calls)
+
+    cfg = llm_settings.get_llm_config()
+    provider = (cfg.get("provider") or "").strip().lower()
+    api_key = (cfg.get("api_key") or "").strip()
+    base_url = (cfg.get("base_url") or "").strip() or None
+    model = (cfg.get("quick_model") or "").strip() or (cfg.get("deep_model") or "").strip()
+
+    if not provider:
+        raise HTTPException(
+            status_code=503,
+            detail="LLM provider is not configured. Please configure an LLM provider in Settings.",
+        )
+
+    env_name = llm_settings.PROVIDER_KEY_ENV.get(provider)
+    if not api_key and env_name:
+        import os
+        api_key = (os.environ.get(env_name) or "").strip()
+
+    if env_name is not None and not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="LLM API key is not configured. Please configure your API key in Settings.",
+        )
+
+    if not model or model == "custom":
+        model = cfg.get("deep_model") or llm_settings.DEFAULT_TEST_MODELS.get(provider, "custom")
+    if not model or model == "custom":
+        raise HTTPException(
+            status_code=503,
+            detail="LLM model is not configured. Please specify a model in Settings.",
+        )
+
+    system_prompt = (
+        "You are TradingAgents' Decision Rationale Assistant. You explain to the user why the multi-agent "
+        "trading system made its decision for a specific analysis run.\n"
+        "Use the provided run context (agent findings, recommendation, order status, debate timeline) "
+        "to answer the user's question accurately, concisely, and insightfully.\n"
+        "Explain the reasoning of different agents (e.g., Trader vs Portfolio Manager, Analysts, Risk Manager) if relevant.\n"
+        "If there is a conflict (such as Trader Action=HOLD vs Portfolio Manager Rating=Overweight), clarify that "
+        "Trader's explicit action is authoritative to avoid entry when there is no existing position.\n"
+        "Always respond in the same language as the user's question (e.g., Chinese if asked in Chinese, English if asked in English).\n\n"
+        f"Context for this run:\n{context}"
+    )
+
+    messages = [
+        ("system", system_prompt),
+        ("human", question),
+    ]
+
+    kwargs: dict[str, Any] = {}
+    if api_key:
+        kwargs["api_key"] = api_key
+        if env_name:
+            import os
+            if not os.environ.get(env_name):
+                os.environ[env_name] = api_key
+    if base_url:
+        kwargs["base_url"] = base_url
+
+    try:
+        from tradingagents.llm_clients import create_llm_client
+
+        client = create_llm_client(provider=provider, model=model, **kwargs)
+        llm = client.get_llm()
+        response = llm.invoke(messages)
+        content = getattr(response, "content", response)
+        if isinstance(content, list):
+            text_parts = []
+            for part in content:
+                if isinstance(part, str):
+                    text_parts.append(part)
+                elif isinstance(part, dict) and "text" in part:
+                    text_parts.append(part["text"])
+                elif hasattr(part, "text"):
+                    text_parts.append(part.text)
+            answer = "\n".join(text_parts).strip()
+        else:
+            answer = str(content).strip()
+
+        return {
+            "answer": answer,
+            "run_id": run_id,
+            "ticker": run.get("ticker", "STOCK"),
+            "model": model,
+            "provider": provider,
+        }
+    except Exception as e:
+        logger.error("Failed to query LLM for run rationale %s: %s", run_id, e, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to query LLM: {e}",
+        )
+
 
 
 @router.post("/runs")

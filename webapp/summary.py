@@ -709,3 +709,109 @@ def summarize_run(
         "steps": steps,
     }
 
+
+def build_run_rationale_context(
+    run: dict[str, Any],
+    summary: dict[str, Any],
+    recommendation: dict[str, Any] | None = None,
+    order: dict[str, Any] | None = None,
+    calls: list[dict[str, Any]] | None = None,
+) -> str:
+    """Assemble a concise, structured context string for explaining decision rationale."""
+    rec = recommendation or run.get("recommendation") or {}
+    ord_info = order or run.get("order") or {}
+    calls = calls or []
+    ticker = (run.get("ticker") or rec.get("ticker") or "STOCK").upper()
+    trade_date = run.get("trade_date") or rec.get("trade_date") or "N/A"
+    status = run.get("status", "completed")
+
+    action = (rec.get("action") or "").strip().upper()
+    rating = (rec.get("rating") or "").strip()
+    entry = rec.get("entry_price")
+    stop = rec.get("stop_loss")
+    target = rec.get("price_target")
+    sizing = rec.get("position_sizing") or "N/A"
+    held_qty = rec.get("current_position_qty")
+    reasoning = rec.get("reasoning") or "N/A"
+
+    has_conflict = (
+        action in ("HOLD", "REVIEW")
+        and rating.upper() in ("BUY", "OVERWEIGHT", "SELL", "UNDERWEIGHT")
+    )
+
+    lines = [
+        "=== RUN OVERVIEW ===",
+        f"Ticker: {ticker}",
+        f"Analysis Date: {trade_date}",
+        f"Status: {status}",
+        f"Trader Action: {action or 'None'}",
+        f"Portfolio Manager Rating: {rating or 'None'}",
+        f"Target Entry Price: {f'${entry:.2f}' if entry is not None else 'Market'}",
+        f"Stop Loss: {f'${stop:.2f}' if stop is not None else 'N/A'}",
+        f"Price Target: {f'${target:.2f}' if target is not None else 'N/A'}",
+        f"Position Sizing: {sizing}",
+        f"Current Position: {held_qty if held_qty is not None else '0'} shares",
+        f"Trader Rationale: {reasoning}",
+    ]
+
+    plan_text = rec.get("trader_investment_plan")
+    if plan_text:
+        plan_excerpt = _extract_first_sentences(plan_text, max_sentences=3, max_chars=350)
+        if plan_excerpt:
+            lines.append(f"Trader Plan Excerpt: {plan_excerpt}")
+
+    pm_text = rec.get("final_trade_decision")
+    if pm_text:
+        pm_excerpt = _extract_first_sentences(pm_text, max_sentences=3, max_chars=350)
+        if pm_excerpt:
+            lines.append(f"PM Final Decision Excerpt: {pm_excerpt}")
+
+    if has_conflict:
+        lines.append(
+            f"\n*** NOTABLE CONFLICT: Trader Action is '{action}' while Portfolio Manager Rating is '{rating}'. "
+            f"The system treats Trader's explicit Action as authoritative (HOLD/REVIEW means avoid entry / stand aside), "
+            f"so no trade order was submitted. ***"
+        )
+
+    if ord_info:
+        lines.append("\n=== ORDER EXECUTION ===")
+        lines.append(f"Order Status: {ord_info.get('status', 'unknown')}")
+        if ord_info.get("side"):
+            lines.append(f"Side: {ord_info.get('side')}")
+        if ord_info.get("qty"):
+            lines.append(f"Quantity: {ord_info.get('qty')} shares")
+        if ord_info.get("skip_reason"):
+            lines.append(f"Skip Reason: {ord_info.get('skip_reason')}")
+        if ord_info.get("alpaca_order_id"):
+            lines.append(f"Alpaca Order ID: {ord_info.get('alpaca_order_id')}")
+
+    steps = summary.get("steps") or []
+    if steps:
+        lines.append("\n=== DECISION TIMELINE STEPS ===")
+        lines.append(f"Overall Verdict: {summary.get('overall', 'N/A')}")
+        for s in steps:
+            step_n = s.get("n", "?")
+            step_name = s.get("name", "Step")
+            who = s.get("who", "")
+            verdict = s.get("verdict", "")
+            key_find = s.get("key_find", "")
+            lines.append(f"- Step {step_n} [{step_name}] ({who}): verdict={verdict}; key finding: {key_find}")
+
+    if calls:
+        lines.append("\n=== KEY AGENT FINDINGS & DEBATE HIGHLIGHTS ===")
+        seen_agents = set()
+        for c in sorted(calls, key=lambda x: x.get("seq", 0)):
+            if not c.get("ok"):
+                continue
+            agent_key = c.get("node") or c.get("agent")
+            if not agent_key or agent_key in seen_agents:
+                continue
+            resp = c.get("response")
+            excerpt = _extract_first_sentences(resp, max_sentences=3, max_chars=350)
+            if excerpt:
+                seen_agents.add(agent_key)
+                lines.append(f"[{agent_key.upper()}]: {excerpt}")
+
+    return "\n".join(lines)
+
+

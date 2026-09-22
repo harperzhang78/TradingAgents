@@ -387,7 +387,7 @@ class AnalysisRunner:
             self._log(run_id, f"⚙️ Auto-trade toggle is currently: {'ENABLED (LIVE/PAPER SUBMISSION)' if auto_trade else 'DISABLED (ADVISORY ONLY)'}")
 
             flat_sell = held_qty <= 0 and (
-                action == "SELL" or (action in ("HOLD", "") and rating in ("SELL", "UNDERWEIGHT"))
+                action == "SELL" or (not action and rating in ("SELL", "UNDERWEIGHT"))
             )
             flat_sell_message = (
                 f"Skipped SELL order: Cannot sell {ticker} because you do not hold a position "
@@ -395,6 +395,18 @@ class AnalysisRunner:
             )
             if flat_sell:
                 self._log(run_id, f"⏸️ {flat_sell_message}")
+
+            # Check for conflict between Trader action and PM rating
+            has_trader_conflict = (
+                action in ("HOLD", "REVIEW")
+                and rating in ("BUY", "OVERWEIGHT", "SELL", "UNDERWEIGHT")
+            )
+            conflict_msg = (
+                f"⚠️ 冲突：Trader Action={action} 但 PM Rating={rating} — "
+                f"以 Trader 的 {action} 为准，未下单（无持仓，避免入场）。"
+            )
+            if has_trader_conflict:
+                self._log(run_id, conflict_msg)
 
             if not auto_trade:
                 # Advisory Mode active: Run remains in Advisory state, no order records created/generated
@@ -408,7 +420,12 @@ class AnalysisRunner:
                 order_spec = build_order(ticker, decision, account_equity, current_market_price, held_qty=held_qty)
 
                 if order_spec is None:
-                    skip_msg = flat_sell_message if flat_sell else f"No order generated: Action '{action}' / Rating '{rating}' evaluated to HOLD/REVIEW."
+                    if has_trader_conflict:
+                        skip_msg = conflict_msg
+                    elif flat_sell:
+                        skip_msg = flat_sell_message
+                    else:
+                        skip_msg = f"No order generated: Action '{action}' / Rating '{rating}' evaluated to HOLD/REVIEW."
                     self._log(run_id, f"⏸️ {skip_msg}")
                     create_order_record(
                         run_id=run_id,

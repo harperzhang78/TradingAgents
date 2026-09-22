@@ -285,6 +285,7 @@
       <!-- Tab bar -->
       <div class="modal-tab-bar">
         <button class="modal-tab-btn active" id="tab-btn-summary" data-tab="summary">📋 Summary</button>
+        <button class="modal-tab-btn" id="tab-btn-why" data-tab="why"><span id="tab-why-label">💬 Why? / 决策问答</span></button>
         <button class="modal-tab-btn" id="tab-btn-llm-calls" data-tab="llm-calls">🤖 LLM Calls <span id="modal-calls-badge" class="badge badge-tag">...</span></button>
         <button class="modal-tab-btn" id="tab-btn-raw-log" data-tab="raw-log">📜 Raw Log</button>
       </div>
@@ -329,9 +330,46 @@
           </div>
           <pre id="modal-logs-pre" class="terminal-logs">Loading logs...</pre>
         </div>
+
+        <!-- Tab 4: Why? / Decision Rationale -->
+        <div id="pane-why" class="tab-pane hidden">
+          <div id="modal-why-summary" class="why-summary-bar mb-2"></div>
+          <div class="chat-chips mb-2" id="modal-why-quick-questions"></div>
+          <div id="modal-why-chat-messages" class="chat-messages mb-3"></div>
+          <form id="modal-why-chat-form" onsubmit="event.preventDefault(); submitWhyQuestionModal();" class="chat-input-row">
+            <input type="text" id="modal-why-chat-input" class="form-input" placeholder="Ask a question about this decision..." autocomplete="off" />
+            <button type="submit" id="modal-why-chat-submit" class="btn btn-primary btn-sm">Send</button>
+          </form>
+        </div>
       </div>
       <div class="modal-footer">
         <button id="modal-btn-close" class="btn btn-secondary">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Decision Rationale Chat Modal -->
+  <div id="why-modal" class="modal-backdrop hidden">
+    <div class="modal modal-md why-modal-container">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <h3 id="why-modal-title">💬 Decision Rationale</h3>
+          <span id="why-modal-badge" class="badge">...</span>
+        </div>
+        <button id="why-modal-close" class="modal-close-btn" onclick="closeWhyModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="why-modal-summary" class="why-summary-bar mb-2"></div>
+        <div class="chat-chips mb-2" id="why-quick-questions"></div>
+        <div id="why-chat-messages" class="chat-messages mb-3"></div>
+        <form id="why-chat-form" onsubmit="event.preventDefault(); submitWhyQuestion();" class="chat-input-row">
+          <input type="text" id="why-chat-input" class="form-input" placeholder="Ask a question about this decision..." autocomplete="off" />
+          <button type="submit" id="why-chat-submit" class="btn btn-primary btn-sm">Send</button>
+        </form>
+      </div>
+      <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center;">
+        <button class="btn btn-secondary btn-sm" onclick="clearWhyChat()" id="why-btn-clear">Clear Chat</button>
+        <button class="btn btn-secondary btn-sm" onclick="closeWhyModal()">Close</button>
       </div>
     </div>
   </div>

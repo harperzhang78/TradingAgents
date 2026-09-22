@@ -45,6 +45,8 @@ const state = {
   llmSearchQuery: '',
   modalPollInterval: null,
   liveConsolePollInterval: null,
+  activeWhyRunId: null,
+  chatHistories: {},
 };
 window.state = state;
 
@@ -912,12 +914,22 @@ function renderRuns() {
       const isAdvisory = (run.status || '').toLowerCase() === 'advisory';
       const actionUpper = (rec && rec.action) ? rec.action.trim().toUpperCase() : '';
       const ratingUpper = (rec && rec.rating) ? rec.rating.trim().toUpperCase() : '';
-      const isReview = ratingUpper === 'REVIEW';
-      const isHold = (ratingUpper === 'HOLD' || ratingUpper === 'NEUTRAL') && actionUpper !== 'BUY' && actionUpper !== 'SELL';
+      const isActionHold = actionUpper === 'HOLD';
+      const isActionReview = actionUpper === 'REVIEW';
+      const isReview = isActionReview || (!actionUpper && ratingUpper === 'REVIEW');
+      const isHold = isActionHold || (!actionUpper && (ratingUpper === 'HOLD' || ratingUpper === 'NEUTRAL'));
+      const isConflict = (isActionHold || isActionReview) && ['BUY', 'OVERWEIGHT', 'SELL', 'UNDERWEIGHT'].includes(ratingUpper);
       const isNonActionable = isReview || isHold || isAvoidEntry(rec);
-      const reviewHint = isReview
-        ? '<span class="text-muted text-xs">Requires manual review (non-actionable)</span>'
-        : '<span class="text-muted text-xs">HOLD — no order will be placed</span>';
+      const isZh = (state.settings?.lang === 'zh') || (getStoredLang() === 'zh');
+      const conflictHint = isZh
+        ? `⚠️ 冲突：Trader 决策为 ${actionUpper}，优先于 PM Rating (${escapeHtml(rec.rating || ratingUpper)}) — 以 Trader 为准，未下单（无持仓，避免入场）`
+        : `⚠️ Conflict: Trader Action=${actionUpper} takes precedence over PM Rating (${escapeHtml(rec.rating || ratingUpper)}) — no order placed (avoid entry)`;
+      const reviewHint = isConflict
+        ? `<span class="text-warning text-xs">${conflictHint}</span>`
+        : (isReview
+          ? (isZh ? '<span class="text-muted text-xs">需人工审核（不可执行）</span>' : '<span class="text-muted text-xs">Requires manual review (non-actionable)</span>')
+          : (isZh ? '<span class="text-muted text-xs">HOLD — 不会下单</span>' : '<span class="text-muted text-xs">HOLD — no order will be placed</span>'));
+      const whyBtnLabel = isZh ? '💬 为什么？' : '💬 Why?';
       const orderSideUpper = (order && order.side) ? order.side.trim().toUpperCase() : '';
 
       // An order is already live executed if it has status 'submitted'
@@ -1110,6 +1122,9 @@ function renderRuns() {
             <button class="btn btn-primary btn-sm" onclick="openLogsModal('${run.id}', 'summary')">
               📋 Summary
             </button>
+            <button class="btn btn-secondary btn-sm" onclick="openWhyModal('${run.id}')" title="${isZh ? '向 AI 提问此决策的原因' : 'Ask AI why this decision was made'}">
+              ${whyBtnLabel}
+            </button>
             ${isPaused ? `<button class="btn btn-success btn-sm" onclick="resumeAnalysis('${run.id}')"><strong>▶ Resume</strong></button>` : ''}
             <button class="btn btn-secondary btn-sm" onclick="openLogsModal('${run.id}', 'llm-calls')">
               🤖 LLM Calls
@@ -1124,6 +1139,11 @@ function renderRuns() {
         ${metricsHtml}
         ${orderBoxHtml}
         ${reasoningHtml}
+        <div style="display: flex; justify-content: flex-end; margin-top: 0.4rem;">
+          <button class="btn btn-secondary btn-sm" onclick="openWhyModal('${run.id}')" title="${isZh ? '向 AI 提问决策逻辑' : 'Ask AI why this decision was made'}">
+            ${whyBtnLabel}
+          </button>
+        </div>
       </div>
     `;
     })
@@ -1541,6 +1561,8 @@ function switchModalTab(tabName) {
 
   if (tabName === 'summary') {
     renderModalSummary();
+  } else if (tabName === 'why') {
+    renderModalWhyTab();
   } else if (tabName === 'llm-calls') {
     filterAndRenderLLMCalls();
   } else if (tabName === 'raw-log') {
@@ -1670,9 +1692,50 @@ async function updateModalData() {
       if (runRes.status === 'fulfilled' && runRes.value) {
         const run = runRes.value;
         state.activeModalRun = run;
-        const isReview = ((run.recommendation && run.recommendation.rating) || '').trim().toUpperCase() === 'REVIEW';
-        document.getElementById('modal-review-badge')?.classList.toggle('hidden', !isReview);
-        document.getElementById('modal-review-hint')?.classList.toggle('hidden', !isReview || (run.status || '').toLowerCase() === 'running');
+        const rec = run.recommendation;
+        const actionUpper = (rec && rec.action) ? rec.action.trim().toUpperCase() : '';
+        const ratingUpper = (rec && rec.rating) ? rec.rating.trim().toUpperCase() : '';
+        const isActionHold = actionUpper === 'HOLD';
+        const isActionReview = actionUpper === 'REVIEW';
+        const isReview = isActionReview || (!actionUpper && ratingUpper === 'REVIEW');
+        const isHold = isActionHold || (!actionUpper && (ratingUpper === 'HOLD' || ratingUpper === 'NEUTRAL'));
+        const isConflict = (isActionHold || isActionReview) && ['BUY', 'OVERWEIGHT', 'SELL', 'UNDERWEIGHT'].includes(ratingUpper);
+        const isNonActionable = isReview || isHold || isAvoidEntry(rec);
+        const isZh = (state.settings?.lang === 'zh') || (getStoredLang() === 'zh');
+
+        const reviewBadge = document.getElementById('modal-review-badge');
+        if (reviewBadge) {
+          if (isReview) {
+            reviewBadge.textContent = 'REVIEW';
+            reviewBadge.className = 'badge badge-review';
+            reviewBadge.classList.remove('hidden');
+          } else if (isHold) {
+            reviewBadge.textContent = 'HOLD';
+            reviewBadge.className = 'badge badge-hold';
+            reviewBadge.classList.remove('hidden');
+          } else {
+            reviewBadge.classList.add('hidden');
+          }
+        }
+
+        const reviewHintEl = document.getElementById('modal-review-hint');
+        if (reviewHintEl) {
+          const isRunning = (run.status || '').toLowerCase() === 'running';
+          if (isRunning || !isNonActionable) {
+            reviewHintEl.classList.add('hidden');
+          } else {
+            reviewHintEl.classList.remove('hidden');
+            if (isConflict) {
+              reviewHintEl.innerHTML = isZh
+                ? `<span class="text-warning">⚠️ 冲突：Trader Action=${actionUpper} 优先于 PM Rating (${escapeHtml(rec.rating || ratingUpper)}) — 以 Trader 为准，未下单</span>`
+                : `<span class="text-warning">⚠️ Conflict: Trader Action=${actionUpper} takes precedence over PM Rating (${escapeHtml(rec.rating || ratingUpper)}) — no order placed</span>`;
+            } else if (isReview) {
+              reviewHintEl.textContent = isZh ? '需人工审核（不可执行）' : 'Requires manual review (non-actionable)';
+            } else {
+              reviewHintEl.textContent = isZh ? 'HOLD — 不会下单' : 'HOLD — no order will be placed';
+            }
+          }
+        }
 
         const titleEl = document.getElementById('modal-title');
         if (titleEl) {
@@ -1698,7 +1761,7 @@ async function updateModalData() {
 
         // Update header execution button in Run Details modal
         const btnHeader = document.getElementById('modal-btn-confirm-execute');
-        if (run && !isReview && !['running', 'paused'].includes((run.status || '').toLowerCase())) {
+        if (run && !isNonActionable && !['running', 'paused'].includes((run.status || '').toLowerCase())) {
           const isSub = Boolean(run.order && run.order.status === 'submitted');
           const isErr = Boolean(run.order && run.order.status === 'failed');
           const btnLabel = isSub ? '⚡ Re-execute Order' : (isErr ? '⚡ Retry & Execute' : '⚡ Confirm & Execute');
@@ -2220,14 +2283,16 @@ function openExecuteModal(runId) {
   }
   const isSubmitted = Boolean(order && order.status === 'submitted');
 
-  const action = ((rec && rec.action) || '').toUpperCase();
-  const rating = ((rec && rec.rating) || '').toUpperCase();
-  const isNonActionable = rating === 'REVIEW' || ((rating === 'HOLD' || rating === 'NEUTRAL') && action !== 'BUY' && action !== 'SELL');
+  const action = ((rec && rec.action) || '').trim().toUpperCase();
+  const rating = ((rec && rec.rating) || '').trim().toUpperCase();
+  const isActionHold = action === 'HOLD';
+  const isActionReview = action === 'REVIEW';
+  const isNonActionable = isActionHold || isActionReview || (!action && (rating === 'REVIEW' || rating === 'HOLD' || rating === 'NEUTRAL'));
 
   if (isNonActionable && !isSubmitted) {
     const alertEl2 = document.getElementById('exec-modal-alert');
     if (alertEl2) {
-      alertEl2.innerHTML = `⛔ <strong>Non-actionable rating (${rating || 'HOLD'}):</strong> This recommendation cannot be executed as an order. A ${rating || 'HOLD'} decision means no trade is placed.`;
+      alertEl2.innerHTML = `⛔ <strong>Non-actionable (${action || rating || 'HOLD'}):</strong> This recommendation cannot be executed as an order. A ${action || rating || 'HOLD'} decision means no trade is placed.`;
       alertEl2.style.color = '';
       alertEl2.className = 'alert alert-danger';
     }
@@ -2242,7 +2307,7 @@ function openExecuteModal(runId) {
   let side = 'buy';
   if (order && (order.side === 'buy' || order.side === 'sell')) {
     side = order.side.toLowerCase();
-  } else if (action === 'SELL' || rating === 'SELL' || rating === 'UNDERWEIGHT') {
+  } else if (action === 'SELL' || (!action && (rating === 'SELL' || rating === 'UNDERWEIGHT'))) {
     side = 'sell';
   } else {
     side = 'buy';
@@ -2552,6 +2617,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Escape') {
       if (!document.getElementById('execute-modal')?.classList.contains('hidden')) {
         closeExecuteModal();
+      } else if (!document.getElementById('why-modal')?.classList.contains('hidden')) {
+        closeWhyModal();
       } else if (!document.getElementById('logs-modal')?.classList.contains('hidden')) {
         closeLogsModal();
       }
@@ -2565,6 +2632,14 @@ document.addEventListener('DOMContentLoaded', () => {
   if (logsModal) {
     logsModal.addEventListener('click', (e) => {
       if (e.target.id === 'logs-modal') closeLogsModal();
+    });
+  }
+
+  // Why modal close background click
+  const whyModal = document.getElementById('why-modal');
+  if (whyModal) {
+    whyModal.addEventListener('click', (e) => {
+      if (e.target.id === 'why-modal') closeWhyModal();
     });
   }
 
@@ -2599,10 +2674,321 @@ document.addEventListener('DOMContentLoaded', () => {
   }, 30000);
 });
 
+// ---------------------------------------------------------------------------
+// Decision Rationale Chat ("Why?")
+// ---------------------------------------------------------------------------
+
+function getWhyGreeting(run, isZh) {
+  const ticker = run?.ticker || 'STOCK';
+  const rec = run?.recommendation || {};
+  const act = rec.action || 'None';
+  const rat = rec.rating || 'None';
+  if (isZh) {
+    return `您好！我是 TradingAgents 决策分析助手。针对 ${ticker} 的本次分析（Trader 决策: ${act}，PM Rating: ${rat}），您可以向我提问关于决策依据、Agent 间分歧、基本面/技术面逻辑或具体执行情况的问题。`;
+  }
+  return `Hello! I am the TradingAgents Decision Assistant. Feel free to ask anything about why this decision was reached for ${ticker} (Trader Action: ${act}, PM Rating: ${rat}) or how specific agents analyzed the market.`;
+}
+
+function getQuickQuestions(isZh) {
+  if (isZh) {
+    return [
+      '为什么做出这个决策？',
+      '各 Agent 之间是否存在分歧？',
+      'Trader 和 PM 的关键依据是什么？',
+      '基本面和技术面有哪些关键信号？',
+    ];
+  }
+  return [
+    'Why was this decision made?',
+    'Were there conflicts between agents?',
+    'What were the Trader and PM arguments?',
+    'What were the key fundamental & technical signals?',
+  ];
+}
+
+function renderChatMessages(containerEl, messages) {
+  if (!containerEl) return;
+  containerEl.innerHTML = (messages || [])
+    .map((msg) => {
+      let cls = 'chat-bubble chat-bubble-ai';
+      if (msg.sender === 'user') cls = 'chat-bubble chat-bubble-user';
+      else if (msg.sender === 'error') cls = 'chat-bubble chat-bubble-error';
+      return `<div class="${cls}">${escapeHtml(msg.text)}</div>`;
+    })
+    .join('');
+  containerEl.scrollTop = containerEl.scrollHeight;
+}
+
+async function openWhyModal(runId) {
+  if (!runId) return;
+  state.activeWhyRunId = runId;
+  const isZh = (state.settings?.lang === 'zh') || (getStoredLang() === 'zh');
+
+  let run = (state.runs || []).find((r) => r.id === runId);
+  if (!run) {
+    try {
+      run = await api(`/api/runs/${runId}`);
+    } catch (e) {
+      console.error('Failed to load run for why modal:', e);
+    }
+  }
+
+  const modal = document.getElementById('why-modal');
+  if (!modal) return;
+
+  const titleEl = document.getElementById('why-modal-title');
+  if (titleEl) {
+    titleEl.textContent = isZh ? `💬 决策逻辑分析 • ${run ? run.ticker : runId.slice(0, 8)}` : `💬 Decision Rationale • ${run ? run.ticker : runId.slice(0, 8)}`;
+  }
+
+  const badgeEl = document.getElementById('why-modal-badge');
+  if (badgeEl && run) {
+    const rec = run.recommendation;
+    const act = (rec && rec.action) ? rec.action.trim().toUpperCase() : '';
+    const rat = (rec && rec.rating) ? rec.rating.trim().toUpperCase() : '';
+    const disp = act || rat || 'ANALYSIS';
+    badgeEl.textContent = disp;
+    badgeEl.className = `badge ${['BUY', 'OVERWEIGHT'].includes(disp) ? 'badge-buy' : ['SELL', 'UNDERWEIGHT'].includes(disp) ? 'badge-sell' : 'badge-hold'}`;
+  }
+
+  const summaryEl = document.getElementById('why-modal-summary');
+  if (summaryEl && run) {
+    const rec = run.recommendation || {};
+    const act = rec.action || 'N/A';
+    const rat = rec.rating || 'N/A';
+    const isConflict = ['HOLD', 'REVIEW'].includes(act.toUpperCase()) && ['BUY', 'OVERWEIGHT', 'SELL', 'UNDERWEIGHT'].includes(rat.toUpperCase());
+    let summaryText = `<strong>Ticker:</strong> ${run.ticker} • <strong>Date:</strong> ${run.trade_date || 'N/A'} • <strong>Trader Action:</strong> ${escapeHtml(act)} • <strong>PM Rating:</strong> ${escapeHtml(rat)}`;
+    if (isConflict) {
+      summaryText += isZh
+        ? `<div class="text-warning text-xs mt-1">⚠️ 冲突说明：Trader 决策为 ${escapeHtml(act)}，系统以 Trader 为准（不下单，避免入场）。</div>`
+        : `<div class="text-warning text-xs mt-1">⚠️ Conflict Note: Trader Action is ${escapeHtml(act)}, which takes precedence over PM Rating (${escapeHtml(rat)}). No order placed.</div>`;
+    }
+    summaryEl.innerHTML = summaryText;
+  }
+
+  const chipsEl = document.getElementById('why-quick-questions');
+  if (chipsEl) {
+    const qList = getQuickQuestions(isZh);
+    chipsEl.innerHTML = qList
+      .map((q) => `<span class="chat-chip" onclick="submitWhyQuestion('${escapeHtml(q).replace(/'/g, "\\'")}')">${escapeHtml(q)}</span>`)
+      .join('');
+  }
+
+  if (!state.chatHistories) state.chatHistories = {};
+  if (!state.chatHistories[runId] || state.chatHistories[runId].length === 0) {
+    state.chatHistories[runId] = [
+      { sender: 'ai', text: getWhyGreeting(run || {}, isZh) }
+    ];
+  }
+
+  const msgEl = document.getElementById('why-chat-messages');
+  renderChatMessages(msgEl, state.chatHistories[runId]);
+
+  const inputEl = document.getElementById('why-chat-input');
+  if (inputEl) {
+    inputEl.value = '';
+    inputEl.placeholder = isZh ? '询问关于此决策的问题...（按 Enter 发送）' : 'Ask about this decision... (Press Enter)';
+    setTimeout(() => inputEl.focus(), 100);
+  }
+
+  const clearBtn = document.getElementById('why-btn-clear');
+  if (clearBtn) clearBtn.textContent = isZh ? '清空对话' : 'Clear Chat';
+
+  const submitBtn = document.getElementById('why-chat-submit');
+  if (submitBtn) {
+    submitBtn.disabled = false;
+    submitBtn.textContent = isZh ? '发送' : 'Send';
+  }
+
+  modal.classList.remove('hidden');
+}
+
+function closeWhyModal() {
+  state.activeWhyRunId = null;
+  const modal = document.getElementById('why-modal');
+  if (modal) modal.classList.add('hidden');
+}
+
+async function submitWhyQuestion(presetQuestion) {
+  const runId = state.activeWhyRunId;
+  if (!runId) return;
+  const isZh = (state.settings?.lang === 'zh') || (getStoredLang() === 'zh');
+
+  const inputEl = document.getElementById('why-chat-input');
+  const submitBtn = document.getElementById('why-chat-submit');
+  const question = (presetQuestion || (inputEl ? inputEl.value : '')).trim();
+  if (!question) return;
+
+  if (inputEl) inputEl.value = '';
+
+  if (!state.chatHistories) state.chatHistories = {};
+  if (!state.chatHistories[runId]) state.chatHistories[runId] = [];
+
+  state.chatHistories[runId].push({ sender: 'user', text: question });
+
+  const loadingText = isZh ? '🤖 AI 正在分析决策上下文...' : '🤖 AI is analyzing the decision context...';
+  state.chatHistories[runId].push({ sender: 'ai', text: loadingText, loading: true });
+
+  const msgEl = document.getElementById('why-chat-messages');
+  renderChatMessages(msgEl, state.chatHistories[runId]);
+  if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '...'; }
+
+  try {
+    const res = await api(`/api/runs/${runId}/ask`, {
+      method: 'POST',
+      body: JSON.stringify({ question }),
+    });
+
+    state.chatHistories[runId] = state.chatHistories[runId].filter((m) => !m.loading);
+    const answer = res && res.answer ? res.answer : (isZh ? '（AI 未返回内容）' : '(No response returned)');
+    state.chatHistories[runId].push({ sender: 'ai', text: answer });
+  } catch (err) {
+    state.chatHistories[runId] = state.chatHistories[runId].filter((m) => !m.loading);
+    let errMsg = err?.message || String(err);
+    if (errMsg.includes('503') || errMsg.toLowerCase().includes('not configured')) {
+      errMsg = isZh
+        ? '⚠️ 无法回答：请先在 Settings 中配置 LLM Provider 与 API Key。'
+        : '⚠️ Cannot answer: please configure an LLM provider and API key in Settings first.';
+    } else {
+      errMsg = (isZh ? '❌ 提问失败：' : '❌ Error: ') + errMsg;
+    }
+    state.chatHistories[runId].push({ sender: 'error', text: errMsg });
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = isZh ? '发送' : 'Send';
+    }
+    renderChatMessages(msgEl, state.chatHistories[runId]);
+    if (inputEl) inputEl.focus();
+  }
+}
+
+function clearWhyChat() {
+  const runId = state.activeWhyRunId;
+  if (!runId) return;
+  const isZh = (state.settings?.lang === 'zh') || (getStoredLang() === 'zh');
+  let run = (state.runs || []).find((r) => r.id === runId);
+  state.chatHistories[runId] = [
+    { sender: 'ai', text: getWhyGreeting(run || {}, isZh) }
+  ];
+  const msgEl = document.getElementById('why-chat-messages');
+  renderChatMessages(msgEl, state.chatHistories[runId]);
+}
+
+function renderModalWhyTab() {
+  const runId = state.activeModalRunId;
+  if (!runId) return;
+  const isZh = (state.settings?.lang === 'zh') || (getStoredLang() === 'zh');
+  const run = state.activeModalRun || (state.runs || []).find((r) => r.id === runId) || {};
+
+  const summaryEl = document.getElementById('modal-why-summary');
+  if (summaryEl) {
+    const rec = run.recommendation || {};
+    const act = rec.action || 'N/A';
+    const rat = rec.rating || 'N/A';
+    const isConflict = ['HOLD', 'REVIEW'].includes(act.toUpperCase()) && ['BUY', 'OVERWEIGHT', 'SELL', 'UNDERWEIGHT'].includes(rat.toUpperCase());
+    let summaryText = `<strong>Ticker:</strong> ${run.ticker || 'N/A'} • <strong>Date:</strong> ${run.trade_date || 'N/A'} • <strong>Trader Action:</strong> ${escapeHtml(act)} • <strong>PM Rating:</strong> ${escapeHtml(rat)}`;
+    if (isConflict) {
+      summaryText += isZh
+        ? `<div class="text-warning text-xs mt-1">⚠️ 冲突说明：Trader 决策为 ${escapeHtml(act)}，系统以 Trader 为准（不下单，避免入场）。</div>`
+        : `<div class="text-warning text-xs mt-1">⚠️ Conflict Note: Trader Action is ${escapeHtml(act)}, which takes precedence over PM Rating (${escapeHtml(rat)}). No order placed.</div>`;
+    }
+    summaryEl.innerHTML = summaryText;
+  }
+
+  const chipsEl = document.getElementById('modal-why-quick-questions');
+  if (chipsEl) {
+    const qList = getQuickQuestions(isZh);
+    chipsEl.innerHTML = qList
+      .map((q) => `<span class="chat-chip" onclick="submitWhyQuestionModal('${escapeHtml(q).replace(/'/g, "\\'")}')">${escapeHtml(q)}</span>`)
+      .join('');
+  }
+
+  if (!state.chatHistories) state.chatHistories = {};
+  if (!state.chatHistories[runId] || state.chatHistories[runId].length === 0) {
+    state.chatHistories[runId] = [
+      { sender: 'ai', text: getWhyGreeting(run, isZh) }
+    ];
+  }
+
+  const msgEl = document.getElementById('modal-why-chat-messages');
+  renderChatMessages(msgEl, state.chatHistories[runId]);
+
+  const inputEl = document.getElementById('modal-why-chat-input');
+  if (inputEl) {
+    inputEl.placeholder = isZh ? '询问关于此决策的问题...（按 Enter 发送）' : 'Ask about this decision... (Press Enter)';
+  }
+  const submitBtn = document.getElementById('modal-why-chat-submit');
+  if (submitBtn) {
+    submitBtn.disabled = false;
+    submitBtn.textContent = isZh ? '发送' : 'Send';
+  }
+}
+
+async function submitWhyQuestionModal(presetQuestion) {
+  const runId = state.activeModalRunId;
+  if (!runId) return;
+  const isZh = (state.settings?.lang === 'zh') || (getStoredLang() === 'zh');
+
+  const inputEl = document.getElementById('modal-why-chat-input');
+  const submitBtn = document.getElementById('modal-why-chat-submit');
+  const question = (presetQuestion || (inputEl ? inputEl.value : '')).trim();
+  if (!question) return;
+
+  if (inputEl) inputEl.value = '';
+
+  if (!state.chatHistories) state.chatHistories = {};
+  if (!state.chatHistories[runId]) state.chatHistories[runId] = [];
+
+  state.chatHistories[runId].push({ sender: 'user', text: question });
+
+  const loadingText = isZh ? '🤖 AI 正在分析决策上下文...' : '🤖 AI is analyzing the decision context...';
+  state.chatHistories[runId].push({ sender: 'ai', text: loadingText, loading: true });
+
+  const msgEl = document.getElementById('modal-why-chat-messages');
+  renderChatMessages(msgEl, state.chatHistories[runId]);
+  if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '...'; }
+
+  try {
+    const res = await api(`/api/runs/${runId}/ask`, {
+      method: 'POST',
+      body: JSON.stringify({ question }),
+    });
+
+    state.chatHistories[runId] = state.chatHistories[runId].filter((m) => !m.loading);
+    const answer = res && res.answer ? res.answer : (isZh ? '（AI 未返回内容）' : '(No response returned)');
+    state.chatHistories[runId].push({ sender: 'ai', text: answer });
+  } catch (err) {
+    state.chatHistories[runId] = state.chatHistories[runId].filter((m) => !m.loading);
+    let errMsg = err?.message || String(err);
+    if (errMsg.includes('503') || errMsg.toLowerCase().includes('not configured')) {
+      errMsg = isZh
+        ? '⚠️ 无法回答：请先在 Settings 中配置 LLM Provider 与 API Key。'
+        : '⚠️ Cannot answer: please configure an LLM provider and API key in Settings first.';
+    } else {
+      errMsg = (isZh ? '❌ 提问失败：' : '❌ Error: ') + errMsg;
+    }
+    state.chatHistories[runId].push({ sender: 'error', text: errMsg });
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = isZh ? '发送' : 'Send';
+    }
+    renderChatMessages(msgEl, state.chatHistories[runId]);
+    if (inputEl) inputEl.focus();
+  }
+}
+
 // Global aliases and window bindings for inline HTML onclick handlers & cross-compatibility
 window.openRunModal = openLogsModal;
 window.openLogsModal = openLogsModal;
 window.closeLogsModal = closeLogsModal;
+window.openWhyModal = openWhyModal;
+window.closeWhyModal = closeWhyModal;
+window.submitWhyQuestion = submitWhyQuestion;
+window.clearWhyChat = clearWhyChat;
+window.renderModalWhyTab = renderModalWhyTab;
+window.submitWhyQuestionModal = submitWhyQuestionModal;
 window.openExecuteModal = openExecuteModal;
 window.confirmAndExecute = openExecuteModal;
 window.confirmAndExecuteOrder = openExecuteModal;
