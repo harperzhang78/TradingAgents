@@ -88,6 +88,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # provider-specific URL here would leak (e.g. OpenAI's /v1 was previously
     # being forwarded to Gemini, producing malformed request URLs).
     "backend_url": None,
+    "deep_think_provider": "",
+    "deep_think_api_key": "",
+    "deep_think_base_url": "",
+    "quick_think_provider": "",
+    "quick_think_api_key": "",
+    "quick_think_base_url": "",
     # Provider-specific thinking configuration
     "google_thinking_level": None,      # "high", "minimal", etc.
     "openai_reasoning_effort": None,    # "medium", "high", "low"

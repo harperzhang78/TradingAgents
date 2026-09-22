@@ -444,6 +444,20 @@ function renderLlmConfig() {
   // Background polls must preserve pending key edits in the open modal.
   if (document.getElementById('settings-modal')?.classList.contains('hidden')) {
     resetLlmApiKeyControl(cfg);
+  for (const tier of ['deep', 'quick']) {
+    const select = document.getElementById(`llm-${tier}-provider`);
+    select.replaceChildren(new Option('Inherit shared', ''));
+    for (const option of document.getElementById('llm-provider').options) {
+      if (option.value) select.add(new Option(option.text, option.value));
+    }
+    select.value = cfg[`${tier}_provider`] || '';
+    document.getElementById(`llm-${tier}-base-url`).value = cfg[`${tier}_base_url`] || '';
+    const key = document.getElementById(`llm-${tier}-api-key`);
+    key.value = '';
+    key.dataset.cleared = 'false';
+    document.getElementById(`llm-${tier}-key-status`).textContent = cfg[`${tier}_api_key_set`] ? `Saved: ${cfg[`${tier}_api_key_masked`]}` : '';
+    document.getElementById(`llm-${tier}-test-result`).textContent = '';
+  }
   }
 
   // Navbar provider badge. Form fields are populated in openSettingsModal() / after
@@ -2168,6 +2182,20 @@ function clearLlmApiKey() {
 
 function setLlmFormValues(cfg) {
   resetLlmApiKeyControl(cfg);
+  for (const tier of ['deep', 'quick']) {
+    const select = document.getElementById(`llm-${tier}-provider`);
+    select.replaceChildren(new Option('Inherit shared', ''));
+    for (const option of document.getElementById('llm-provider').options) {
+      if (option.value) select.add(new Option(option.text, option.value));
+    }
+    select.value = cfg[`${tier}_provider`] || '';
+    document.getElementById(`llm-${tier}-base-url`).value = cfg[`${tier}_base_url`] || '';
+    const key = document.getElementById(`llm-${tier}-api-key`);
+    key.value = '';
+    key.dataset.cleared = 'false';
+    document.getElementById(`llm-${tier}-key-status`).textContent = cfg[`${tier}_api_key_set`] ? `Saved: ${cfg[`${tier}_api_key_masked`]}` : '';
+    document.getElementById(`llm-${tier}-test-result`).textContent = '';
+  }
   const providerEl = document.getElementById('llm-provider');
   const keyEl = document.getElementById('llm-api-key');
   const baseUrlEl = document.getElementById('llm-base-url');
@@ -2210,6 +2238,13 @@ async function saveSettingsFromModal() {
   llmPayload.base_url = baseUrl;
   llmPayload.deep_model = deepModel;
   llmPayload.quick_model = quickModel;
+  for (const tier of ['deep', 'quick']) {
+    llmPayload[`${tier}_provider`] = document.getElementById(`llm-${tier}-provider`).value;
+    llmPayload[`${tier}_base_url`] = document.getElementById(`llm-${tier}-base-url`).value.trim();
+    const key = document.getElementById(`llm-${tier}-api-key`);
+    if (key.value.trim()) llmPayload[`${tier}_api_key`] = key.value.trim();
+    else if (key.dataset.cleared === 'true') llmPayload[`${tier}_api_key`] = '';
+  }
 
   try {
     const results = await Promise.all([
@@ -2234,6 +2269,33 @@ async function saveSettingsFromModal() {
     showToast(Object.keys(llmPayload).length > 0 ? 'Settings & LLM config saved' : 'Settings saved', 'success');
   } catch (err) {
     showToast(`Failed to save: ${err.message}`, 'error');
+  }
+}
+
+async function testTierConnection(tier) {
+  const result = document.getElementById(`llm-${tier}-test-result`);
+  const button = document.getElementById(`btn-test-${tier}`);
+  const key = document.getElementById(`llm-${tier}-api-key`);
+  const payload = {
+    tier,
+    provider: document.getElementById(`llm-${tier}-provider`).value || document.getElementById('llm-provider').value || state.llmConfig.provider,
+    base_url: document.getElementById(`llm-${tier}-base-url`).value.trim() || document.getElementById('llm-base-url').value.trim(),
+    model: document.getElementById(`llm-${tier}-model`).value.trim() || null,
+  };
+  if (key.value.trim()) payload.api_key = key.value.trim();
+  else if (key.dataset.cleared === 'true' || !state.llmConfig[`${tier}_api_key_set`]) {
+    payload.api_key = document.getElementById('llm-api-key').value.trim() || null;
+    payload.inherit_api_key = true;
+  }
+  button.disabled = true;
+  result.textContent = 'Testing…';
+  try {
+    const response = await api('/api/llm-config/test', { method: 'POST', body: JSON.stringify(payload) });
+    result.textContent = '✅ ' + response.message;
+  } catch (err) {
+    result.textContent = '❌ ' + err.message;
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -2512,6 +2574,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('btn-clear-api-key').addEventListener('click', clearLlmApiKey);
 
+  for (const tier of ['deep', 'quick']) {
+    document.getElementById(`btn-test-${tier}`).addEventListener('click', () => testTierConnection(tier));
+    document.getElementById(`btn-clear-${tier}-api-key`).addEventListener('click', () => {
+      const key = document.getElementById(`llm-${tier}-api-key`);
+      key.value = '';
+      key.dataset.cleared = 'true';
+      document.getElementById(`llm-${tier}-key-status`).textContent = 'Will inherit shared when saved';
+    });
+  }
   // LLM test connection button
   const btnTestLlm = document.getElementById('btn-test-llm');
   if (btnTestLlm) btnTestLlm.addEventListener('click', testLlmConnection);

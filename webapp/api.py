@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -80,6 +80,33 @@ class LLMConfigUpdateRequest(BaseModel):
     base_url: str | None = None
     deep_model: str | None = None
     quick_model: str | None = None
+    deep_provider: str | None = None
+    deep_api_key: str | None = None
+    deep_base_url: str | None = None
+    quick_provider: str | None = None
+    quick_api_key: str | None = None
+    quick_base_url: str | None = None
+
+
+
+class LLMConfigUpdateResponse(BaseModel):
+    provider: str
+    base_url: str
+    deep_model: str
+    quick_model: str
+    api_key_set: bool
+    api_key_masked: str
+    api_key_source: str | None = None
+    key_env_var: str | None = None
+    providers: list[str]
+    deep_provider: str
+    deep_base_url: str
+    deep_api_key_set: bool
+    deep_api_key_masked: str
+    quick_provider: str
+    quick_base_url: str
+    quick_api_key_set: bool
+    quick_api_key_masked: str
 
 
 class RunTriggerRequest(BaseModel):
@@ -313,15 +340,19 @@ def update_settings(req: SettingsUpdateRequest) -> dict[str, Any]:
 # LLM Provider Configuration
 # ---------------------------------------------------------------------------
 
-@router.get("/llm-config")
+@router.get("/llm-config", response_model=LLMConfigUpdateResponse)
 def get_llm_config() -> dict[str, Any]:
     """Return the effective LLM provider configuration (API key masked)."""
     return llm_settings.get_llm_config_public()
 
 
-@router.post("/llm-config")
+@router.post("/llm-config", response_model=LLMConfigUpdateResponse)
 def update_llm_config(req: LLMConfigUpdateRequest) -> dict[str, Any]:
     """Persist LLM provider settings; a provider change rewrites the provider-scoped fields."""
+    for tier in ("deep", "quick"):
+        value = getattr(req, f"{tier}_provider")
+        if value and value.strip() not in llm_settings.LLM_PROVIDERS:
+            raise HTTPException(status_code=422, detail=f"Unsupported {tier} provider")
     if req.provider is not None and (req.provider == "" or req.provider in llm_settings.LLM_PROVIDERS):
         set_setting(llm_settings.SETTING_PROVIDER, req.provider.strip())
         # Switching provider: clear key/URL/models that belonged to the old provider.
@@ -337,11 +368,17 @@ def update_llm_config(req: LLMConfigUpdateRequest) -> dict[str, Any]:
         set_setting(llm_settings.SETTING_DEEP_MODEL, req.deep_model.strip())
     if req.quick_model is not None:
         set_setting(llm_settings.SETTING_QUICK_MODEL, req.quick_model.strip())
+    for field, setting in llm_settings.TIER_SETTINGS.items():
+        value = getattr(req, field)
+        if value is not None:
+            set_setting(setting, value.strip())
     return get_llm_config()
 
 
 class LLMTestRequest(BaseModel):
-    provider: str
+    tier: Literal["deep", "quick"] | None = None
+    inherit_api_key: bool = False
+    provider: str | None = None
     api_key: str | None = None
     base_url: str | None = None
     model: str | None = None
@@ -351,16 +388,30 @@ class LLMTestRequest(BaseModel):
 def test_llm_config(req: LLMTestRequest) -> dict[str, Any]:
     """Make one throwaway call to verify a provider/key/model combination."""
     try:
+        saved = llm_settings.get_llm_config()
+        provider = req.provider
         api_key = req.api_key
-        if not api_key:
-            saved = llm_settings.get_llm_config()
-            if saved["provider"] == req.provider.strip().lower():
+        base_url = req.base_url
+        model = req.model
+        if req.tier:
+            tier = req.tier
+            saved_provider = saved[f"{tier}_provider"] or saved["provider"]
+            provider = provider or saved_provider
+            if api_key is None and provider == saved_provider:
+                api_key = ("" if req.inherit_api_key else saved[f"{tier}_api_key"]) or saved["api_key"]
+            if base_url is None:
+                base_url = saved[f"{tier}_base_url"] or saved["base_url"]
+            if model is None:
+                model = saved[f"{tier}_model"]
+        else:
+            provider = provider or saved["provider"]
+            if not api_key and saved["provider"] == provider.strip().lower():
                 api_key = saved["api_key"]
         message = llm_settings.test_connection(
-            provider=req.provider,
+            provider=provider,
             api_key=api_key,
-            base_url=req.base_url,
-            model=req.model,
+            base_url=base_url,
+            model=model,
         )
     except Exception as e:  # noqa: BLE001 - surface the provider's real error message
         raise HTTPException(status_code=502, detail=str(e))

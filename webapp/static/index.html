@@ -495,6 +495,44 @@
             </div>
           </div>
 
+          <fieldset class="form-group">
+            <legend>Deep-Think Model</legend>
+            <label class="form-label" for="llm-deep-provider">Provider</label>
+            <select id="llm-deep-provider" class="form-select"><option value="">Inherit shared</option></select>
+            <label class="form-label" for="llm-deep-api-key">API Key</label>
+            <div class="form-desc">Leave blank to keep a saved key. Clear it to inherit shared.</div>
+            <div class="input-action-row">
+              <input type="password" id="llm-deep-api-key" class="form-input" placeholder="Inherit shared" autocomplete="off" />
+              <button id="btn-clear-deep-api-key" class="btn btn-secondary" type="button">Clear</button>
+            </div>
+            <span id="llm-deep-key-status" class="form-desc"></span>
+            <label class="form-label" for="llm-deep-base-url">Base URL</label>
+            <input type="text" id="llm-deep-base-url" class="form-input" placeholder="Inherit shared" />
+            <div class="llm-test-row">
+              <button id="btn-test-deep" class="btn btn-secondary" type="button">Test Deep</button>
+              <span id="llm-deep-test-result" class="llm-test-result"></span>
+            </div>
+          </fieldset>
+
+          <fieldset class="form-group">
+            <legend>Quick-Think Model</legend>
+            <label class="form-label" for="llm-quick-provider">Provider</label>
+            <select id="llm-quick-provider" class="form-select"><option value="">Inherit shared</option></select>
+            <label class="form-label" for="llm-quick-api-key">API Key</label>
+            <div class="form-desc">Leave blank to keep a saved key. Clear it to inherit shared.</div>
+            <div class="input-action-row">
+              <input type="password" id="llm-quick-api-key" class="form-input" placeholder="Inherit shared" autocomplete="off" />
+              <button id="btn-clear-quick-api-key" class="btn btn-secondary" type="button">Clear</button>
+            </div>
+            <span id="llm-quick-key-status" class="form-desc"></span>
+            <label class="form-label" for="llm-quick-base-url">Base URL</label>
+            <input type="text" id="llm-quick-base-url" class="form-input" placeholder="Inherit shared" />
+            <div class="llm-test-row">
+              <button id="btn-test-quick" class="btn btn-secondary" type="button">Test Quick</button>
+              <span id="llm-quick-test-result" class="llm-test-result"></span>
+            </div>
+          </fieldset>
+
           <div class="llm-test-row">
             <button id="btn-test-llm" class="btn btn-secondary" type="button">🔌 Test Connection</button>
             <span id="llm-test-result" class="llm-test-result"></span>

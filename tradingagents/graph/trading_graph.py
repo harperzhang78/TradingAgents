@@ -119,25 +119,8 @@ class TradingAgentsGraph:
         os.makedirs(self.config["data_cache_dir"], exist_ok=True)
         os.makedirs(self.config["results_dir"], exist_ok=True)
 
-        # Initialize LLMs with provider-specific thinking configuration
-        llm_kwargs = self._get_provider_kwargs()
-
-        # Add callbacks to kwargs if provided (passed to LLM constructor)
-        if self.callbacks:
-            llm_kwargs["callbacks"] = self.callbacks
-
-        deep_client = create_llm_client(
-            provider=self.config["llm_provider"],
-            model=self.config["deep_think_llm"],
-            base_url=self.config.get("backend_url"),
-            **llm_kwargs,
-        )
-        quick_client = create_llm_client(
-            provider=self.config["llm_provider"],
-            model=self.config["quick_think_llm"],
-            base_url=self.config.get("backend_url"),
-            **llm_kwargs,
-        )
+        deep_client = self._create_tier_client("deep")
+        quick_client = self._create_tier_client("quick")
 
         self.deep_thinking_llm = deep_client.get_llm()
         self.quick_thinking_llm = quick_client.get_llm()
@@ -179,10 +162,25 @@ class TradingAgentsGraph:
         self._checkpointer_ctx = None
         self._resuming = False
 
-    def _get_provider_kwargs(self) -> dict[str, Any]:
+    def _create_tier_client(self, tier: str):
+        provider = self.config.get(f"{tier}_think_provider") or self.config["llm_provider"]
+        kwargs = self._get_provider_kwargs(provider)
+        if self.callbacks:
+            kwargs["callbacks"] = self.callbacks
+        key = self.config.get(f"{tier}_think_api_key") or self.config.get("api_key")
+        if key:
+            kwargs["api_key"] = key
+        return create_llm_client(
+            provider=provider,
+            model=self.config[f"{tier}_think_llm"],
+            base_url=self.config.get(f"{tier}_think_base_url") or self.config.get("backend_url"),
+            **kwargs,
+        )
+
+    def _get_provider_kwargs(self, provider: str | None = None) -> dict[str, Any]:
         """Get provider-specific kwargs for LLM client creation."""
         kwargs = {}
-        provider = self.config.get("llm_provider", "").lower()
+        provider = (provider or self.config.get("llm_provider", "")).lower()
 
         if provider == "google":
             thinking_level = self.config.get("google_thinking_level")

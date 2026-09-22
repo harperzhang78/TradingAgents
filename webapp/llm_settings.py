@@ -53,6 +53,22 @@ SETTING_API_KEY = "llm_api_key"
 SETTING_BASE_URL = "llm_base_url"
 SETTING_DEEP_MODEL = "llm_deep_model"
 SETTING_QUICK_MODEL = "llm_quick_model"
+SETTING_DEEP_PROVIDER = "llm_deep_provider"
+SETTING_DEEP_API_KEY = "llm_deep_api_key"
+SETTING_DEEP_BASE_URL = "llm_deep_base_url"
+SETTING_QUICK_PROVIDER = "llm_quick_provider"
+SETTING_QUICK_API_KEY = "llm_quick_api_key"
+SETTING_QUICK_BASE_URL = "llm_quick_base_url"
+
+TIER_SETTINGS = {
+    "deep_provider": SETTING_DEEP_PROVIDER,
+    "deep_api_key": SETTING_DEEP_API_KEY,
+    "deep_base_url": SETTING_DEEP_BASE_URL,
+    "quick_provider": SETTING_QUICK_PROVIDER,
+    "quick_api_key": SETTING_QUICK_API_KEY,
+    "quick_base_url": SETTING_QUICK_BASE_URL,
+}
+
 
 # Sensible default model used by the "test connection" endpoint when the caller
 # does not supply one. "custom" means the caller must supply a model ID.
@@ -97,6 +113,7 @@ def get_llm_config() -> dict[str, str]:
     raw = get_all_settings()
     provider = raw.get(SETTING_PROVIDER, "") or str(DEFAULT_CONFIG.get("llm_provider", ""))
     return {
+        **{field: raw.get(key, "") for field, key in TIER_SETTINGS.items()},
         "provider": provider,
         "api_key": raw.get(SETTING_API_KEY, ""),
         "base_url": raw.get(SETTING_BASE_URL, ""),
@@ -124,6 +141,10 @@ def get_llm_config_public() -> dict[str, Any]:
         api_key_masked = _mask_key(env_key) if env_key else (f"{env_name} (from .env)" if env_name else "not set")
         cfg["api_key_source"] = ".env"
 
+    for tier in ("deep", "quick"):
+        key = cfg.pop(f"{tier}_api_key")
+        cfg[f"{tier}_api_key_set"] = bool(key.strip())
+        cfg[f"{tier}_api_key_masked"] = _mask_key(key)
     cfg.pop("api_key")  # never expose the raw key
     cfg["api_key_set"] = api_key_set
     cfg["api_key_masked"] = api_key_masked
@@ -144,6 +165,9 @@ def apply_llm_config(config: dict[str, Any]) -> dict[str, Any]:
 
     raw = get_all_settings()
     provider = (raw.get(SETTING_PROVIDER, "") or "").strip()
+    for field, setting in TIER_SETTINGS.items():
+        tier, suffix = field.split("_", 1)
+        config[f"{tier}_think_{suffix}"] = (raw.get(setting, "") or "").strip()
     if not provider:
         return config  # UI unconfigured -> rely on .env / DEFAULT_CONFIG
 
@@ -165,6 +189,7 @@ def apply_llm_config(config: dict[str, Any]) -> dict[str, Any]:
 
     db_key = (raw.get(SETTING_API_KEY, "") or "").strip()
     if db_key:
+        config["api_key"] = db_key
         env_name = PROVIDER_KEY_ENV.get(provider)
         if env_name:
             os.environ[env_name] = db_key
