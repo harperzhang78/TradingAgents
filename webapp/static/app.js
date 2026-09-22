@@ -54,6 +54,7 @@ function formatDate(isoStr) {
     return d.toLocaleString('en-US', {
       month: 'short',
       day: 'numeric',
+      year: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
@@ -1010,7 +1011,7 @@ function renderRuns() {
             <span class="run-ticker">${run.ticker}</span>
             ${actionBadge}
             ${isAdvisory ? '<span class="badge badge-hold">ADVISORY</span>' : ''}
-            <span class="run-meta">• ${formatDate(run.started_at)} • Date: ${run.trade_date} • ${run.trigger}</span>
+            <span class="run-meta">• ${formatDate(run.started_at)} • ${run.trigger}</span>
           </div>
           <div class="run-card-actions" style="display: flex; gap: 0.35rem; align-items: center;">
             <button class="btn btn-primary btn-sm" onclick="openLogsModal('${run.id}', 'summary')">
