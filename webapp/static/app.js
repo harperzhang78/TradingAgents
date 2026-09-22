@@ -890,7 +890,6 @@ function renderRuns() {
         const entry = rec.entry_price ? formatCurrency(rec.entry_price) : 'Market';
         const stop = rec.stop_loss ? formatCurrency(rec.stop_loss) : 'N/A';
         const target = rec.price_target ? formatCurrency(rec.price_target) : 'N/A';
-        const sizing = rec.position_sizing || '5% of portfolio';
         const held =
           rec.current_position_qty && rec.current_position_qty > 0
             ? `${rec.current_position_qty} shs`
@@ -902,7 +901,6 @@ function renderRuns() {
           <div class="metric-box"><div class="metric-label">Entry</div><div class="metric-val">${entry}</div></div>
           <div class="metric-box"><div class="metric-label">Stop Loss</div><div class="metric-val">${stop}</div></div>
           <div class="metric-box"><div class="metric-label">Target</div><div class="metric-val">${target}</div></div>
-          <div class="metric-box"><div class="metric-label">Sizing</div><div class="metric-val">${sizing}</div></div>
           <div class="metric-box"><div class="metric-label">Held at Run</div><div class="metric-val">${held}</div></div>
         </div>
       `;

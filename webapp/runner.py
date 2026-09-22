@@ -325,7 +325,26 @@ class AnalysisRunner:
                         status="skipped",
                         skip_reason=skip_msg,
                     )
+                elif order_spec["side"] == "sell" and held_qty <= 0:
+                    skip_msg = f"Skipped SELL order: Cannot sell {ticker} because you do not hold a position in {ticker} (0 shares held)."
+                    self._log(run_id, f"⏸️ {skip_msg}")
+                    create_order_record(
+                        run_id=run_id,
+                        recommendation_id=rec_id,
+                        ticker=ticker,
+                        side="sell",
+                        order_type="none",
+                        qty=None,
+                        notional=None,
+                        limit_price=None,
+                        stop_price=None,
+                        take_profit_price=None,
+                        status="skipped",
+                        skip_reason=skip_msg,
+                    )
                 else:
+                    if order_spec["side"] == "sell" and held_qty > 0 and order_spec.get("qty"):
+                        order_spec["qty"] = min(int(order_spec["qty"]), int(held_qty))
                     self._log(
                         run_id,
                         f"📦 Order specification: {order_spec['side'].upper()} {order_spec['symbol']} "

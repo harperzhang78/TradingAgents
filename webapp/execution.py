@@ -521,12 +521,16 @@ def submit_alpaca_order(order: dict, client: TradingClient | None = None) -> dic
     side = OrderSide.BUY if order["side"] == "buy" else OrderSide.SELL
 
     if order["otype"] == "market":
-        req = MarketOrderRequest(
-            symbol=order["symbol"],
-            notional=order.get("notional"),
-            side=side,
-            time_in_force="day",
-        )
+        mkt_kwargs: dict[str, Any] = {
+            "symbol": order["symbol"],
+            "side": side,
+            "time_in_force": "day",
+        }
+        if order.get("qty"):
+            mkt_kwargs["qty"] = order["qty"]
+        else:
+            mkt_kwargs["notional"] = order.get("notional")
+        req = MarketOrderRequest(**mkt_kwargs)
     else:
         kwargs: dict[str, Any] = dict(
             symbol=order["symbol"],
@@ -852,6 +856,38 @@ def execute_recommendation(
 
         order_spec["stop_price"] = st
         order_spec["take_profit_price"] = tp
+
+    # Position validation check for sell orders: prevent selling unheld stocks
+    if order_spec["side"] == "sell":
+        positions = acct_info.get("positions", [])
+        pos = next(
+            (p for p in positions if str(p.get("symbol", "")).strip().upper() == ticker),
+            None,
+        )
+        held_qty = 0.0
+        if pos:
+            pos_side = str(pos.get("side", "")).lower()
+            if "short" not in pos_side:
+                try:
+                    held_qty = float(pos.get("qty", 0.0))
+                except (ValueError, TypeError):
+                    held_qty = 0.0
+
+        if held_qty <= 0:
+            err_msg = f"Cannot sell {ticker}: you do not hold a position in {ticker}"
+            if actual_run_id:
+                now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
+                append_run_log(actual_run_id, f"[{now_str}] ❌ Order execution rejected: {err_msg}\n")
+            raise ValueError(err_msg)
+
+        if order_spec.get("qty") is not None:
+            order_spec["qty"] = min(int(order_spec["qty"]), int(held_qty))
+            if order_spec["qty"] <= 0:
+                err_msg = f"Cannot sell {ticker}: you do not hold a position in {ticker}"
+                if actual_run_id:
+                    now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
+                    append_run_log(actual_run_id, f"[{now_str}] ❌ Order execution rejected: {err_msg}\n")
+                raise ValueError(err_msg)
 
     # Submit to Alpaca
     rec_id = recommendation.get("id")

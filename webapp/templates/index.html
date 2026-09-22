@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TradingAgents Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260921_v6" />
+  <link rel="stylesheet" href="/static/style.css?v=20260921_v7" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -248,6 +248,7 @@
               <button class="filter-btn" data-filter="BUY">BUY</button>
               <button class="filter-btn" data-filter="SELL">SELL</button>
               <button class="filter-btn" data-filter="HOLD">HOLD</button>
+              <button class="filter-btn" data-filter="REVIEW">REVIEW</button>
             </div>
           </div>
           <div class="card-body">
@@ -267,8 +268,10 @@
         <div class="modal-title-group">
           <h3 id="modal-title">Run Details & Logs</h3>
           <span id="modal-status-badge" class="badge">...</span>
+          <span id="modal-review-badge" class="badge badge-review hidden">REVIEW</span>
         </div>
-        <div class="modal-header-actions" style="display: flex; gap: 0.6rem; align-items: center;">
+        <div class="modal-header-actions">
+          <span id="modal-review-hint" class="text-muted text-xs hidden">Requires manual review (non-actionable)</span>
           <button id="modal-btn-confirm-execute" class="btn btn-success btn-confirm-execute btn-sm hidden" onclick="openExecuteModalFromDetails()">
             ⚡ Confirm &amp; Execute
           </button>
@@ -415,12 +418,15 @@
           <div class="form-group">
             <label class="form-label" for="llm-api-key">API Key</label>
             <div class="form-desc">Stored in the local dashboard DB. Leave blank to keep the current key or use one from <code>.env</code>.</div>
-            <input type="password" id="llm-api-key" class="form-input" placeholder="API key (optional if in .env)" autocomplete="off" />
+            <div class="input-action-row">
+              <input type="password" id="llm-api-key" class="form-input" placeholder="API key (optional if in .env)" autocomplete="off" />
+              <button id="btn-clear-api-key" class="btn btn-secondary hidden" type="button">Clear</button>
+            </div>
           </div>
 
           <div class="form-group">
             <label class="form-label" for="llm-base-url">Base URL <span class="form-desc">(optional)</span></label>
-            <div class="form-desc">Only for custom / local endpoints (e.g. vLLM, LM Studio, Ollama). Leave blank for hosted providers.</div>
+            <div class="form-desc">Override the provider default API endpoint (e.g. proxy, custom gateway). Leave blank to use the provider default.</div>
             <input type="text" id="llm-base-url" class="form-input" placeholder="e.g. http://localhost:11434/v1" />
           </div>
 
@@ -478,7 +484,7 @@
           <input type="hidden" id="exec-rec-id" />
 
           <div class="form-row">
-            <div class="form-group" style="max-width: 130px;">
+            <div class="form-group form-group-side">
               <label class="form-label" for="exec-side">Side</label>
               <select id="exec-side" class="form-select">
                 <option value="buy">BUY</option>
@@ -525,6 +531,6 @@
   <!-- Toast Notification Container -->
   <div id="toast-container" class="toast-container"></div>
 
-  <script src="/static/app.js?v=20260921_v6"></script>
+  <script src="/static/app.js?v=20260921_v7"></script>
 </body>
 </html>

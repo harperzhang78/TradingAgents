@@ -662,3 +662,199 @@ def test_auto_trade_enabled_workflow_creates_order_and_completes(tmp_path):
         assert run_detail["order"]["status"] == "submitted"
         assert run_detail["order"]["alpaca_order_id"] == "alpaca-auto-ord-111"
 
+
+def test_auto_trade_sell_flat_skips_order(tmp_path):
+    """When Auto-Trade is ON, runner skips SELL order if ticker position is flat (0 shares)."""
+    import json
+    from webapp.db import set_setting
+    from webapp.runner import runner
+
+    set_setting("auto_trade", "true")
+
+    log_data = {
+        "trader_investment_plan": "**Action**: SELL\n**Entry Price**: $180.00\n**Stop Loss**: $190.00\n**Position Sizing**: 5%\n**Reasoning**: Take profits.",
+        "final_trade_decision": "**Rating**: Sell\n**Price Target**: $160.00",
+    }
+    dummy_log = tmp_path / "dummy_decision_autotrade_sell.json"
+    dummy_log.write_text(json.dumps(log_data), encoding="utf-8")
+
+    run_id = str(uuid.uuid4())
+    create_run(run_id, "GOOG", "2026-09-20", "manual")
+
+    with patch("webapp.runner.submit_alpaca_order") as mock_submit, \
+         patch("webapp.runner.get_alpaca_trading_client") as mock_client, \
+         patch("webapp.runner.get_account_overview") as mock_acct:
+        mock_acct.return_value = {
+            "equity": 100000.0,
+            "positions": [],
+        }
+        runner._execute_job(run_id, "GOOG", "2026-09-20", "manual", from_log_path=str(dummy_log))
+
+        mock_submit.assert_not_called()
+        ord_record = get_order_by_run(run_id)
+        assert ord_record is not None
+        assert ord_record["status"] == "skipped"
+        assert "Cannot sell GOOG because you do not hold a position" in ord_record["skip_reason"]
+
+
+# ---------------------------------------------------------------------------
+# Sell Position Validation & Sizing UI Tests
+# ---------------------------------------------------------------------------
+
+@patch("webapp.execution.fetch_last_close_price")
+@patch("webapp.execution.get_account_overview")
+@patch("webapp.execution.submit_alpaca_order")
+def test_execute_sell_order_flat_position_raises_value_error(mock_submit, mock_acct, mock_price):
+    """Selling a ticker with 0 shares / flat position must raise ValueError."""
+    mock_acct.return_value = {
+        "status": "AccountStatus.ACTIVE",
+        "equity": 100000.0,
+        "cash": 100000.0,
+        "buying_power": 100000.0,
+        "currency": "USD",
+        "paper": True,
+        "positions": [],  # Flat (0 shares held)
+    }
+    mock_price.return_value = 180.0
+
+    run_id = str(uuid.uuid4())
+    create_run(run_id, "GOOG", "2026-09-20", "manual")
+    rec_id = create_recommendation(
+        run_id=run_id,
+        ticker="GOOG",
+        trade_date="2026-09-20",
+        action="SELL",
+        rating="SELL",
+        entry_price=180.0,
+        stop_loss=190.0,
+        price_target=160.0,
+        position_sizing="5%",
+        reasoning="Bearish divergence.",
+    )
+    update_run_status(run_id, "completed")
+    rec = get_recommendation(rec_id)
+
+    # 1. Direct function call raises ValueError
+    with pytest.raises(ValueError, match=r"Cannot sell GOOG: you do not hold a position in GOOG"):
+        execute_recommendation(rec, run_id=run_id, client=MagicMock())
+
+    # 2. HTTP endpoint returns 400 Bad Request with clear detail
+    res = client.post(f"/api/runs/{run_id}/execute-recommendation")
+    assert res.status_code == 400
+    assert "Cannot sell GOOG: you do not hold a position in GOOG" in res.json()["detail"]
+
+    # Verify no order was submitted to Alpaca or recorded in DB
+    mock_submit.assert_not_called()
+    assert get_order_by_run(run_id) is None
+
+
+@patch("webapp.execution.fetch_last_close_price")
+@patch("webapp.execution.get_account_overview")
+@patch("webapp.execution.submit_alpaca_order")
+def test_execute_sell_order_short_position_raises_value_error(mock_submit, mock_acct, mock_price):
+    """Selling a ticker when the existing position is short must also be rejected."""
+    mock_acct.return_value = {
+        "status": "AccountStatus.ACTIVE",
+        "equity": 100000.0,
+        "cash": 100000.0,
+        "buying_power": 100000.0,
+        "currency": "USD",
+        "paper": True,
+        "positions": [{"symbol": "GOOG", "qty": 20.0, "side": "short"}],
+    }
+    mock_price.return_value = 180.0
+
+    run_id = str(uuid.uuid4())
+    create_run(run_id, "GOOG", "2026-09-20", "manual")
+    rec_id = create_recommendation(
+        run_id=run_id,
+        ticker="GOOG",
+        trade_date="2026-09-20",
+        action="SELL",
+        rating="SELL",
+        entry_price=180.0,
+        stop_loss=190.0,
+        price_target=160.0,
+        position_sizing="5%",
+        reasoning="Bearish trend.",
+    )
+    update_run_status(run_id, "completed")
+    rec = get_recommendation(rec_id)
+
+    with pytest.raises(ValueError, match=r"Cannot sell GOOG: you do not hold a position in GOOG"):
+        execute_recommendation(rec, run_id=run_id, client=MagicMock())
+
+
+@patch("webapp.execution.fetch_last_close_price")
+@patch("webapp.execution.get_account_overview")
+@patch("webapp.execution.submit_alpaca_order")
+def test_execute_sell_order_clamps_quantity_to_held_shares(mock_submit, mock_acct, mock_price):
+    """When selling, if requested qty exceeds held shares, clamp qty to held shares."""
+    mock_acct.return_value = {
+        "status": "AccountStatus.ACTIVE",
+        "equity": 100000.0,
+        "cash": 100000.0,
+        "buying_power": 100000.0,
+        "currency": "USD",
+        "paper": True,
+        "positions": [{"symbol": "GOOG", "qty": 15.0, "side": "long"}],
+    }
+    mock_price.return_value = 180.0
+    mock_submit.return_value = {
+        "id": "alpaca-sell-clamp-123",
+        "status": "accepted",
+        "symbol": "GOOG",
+        "qty": "15",
+        "side": "sell",
+        "order_type": "limit",
+    }
+
+    run_id = str(uuid.uuid4())
+    create_run(run_id, "GOOG", "2026-09-20", "manual")
+    rec_id = create_recommendation(
+        run_id=run_id,
+        ticker="GOOG",
+        trade_date="2026-09-20",
+        action="SELL",
+        rating="SELL",
+        entry_price=180.0,
+        stop_loss=192.60,
+        price_target=144.00,
+        position_sizing="5%",
+        reasoning="Take profits.",
+    )
+    update_run_status(run_id, "completed")
+
+    # User or default requests 50 shares, but only 15 are held
+    res = client.post(f"/api/runs/{run_id}/execute-recommendation", json={"qty": 50})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["qty"] == 15  # Clamped to held 15 shares
+
+    mock_submit.assert_called_once()
+    called_order = mock_submit.call_args[0][0]
+    assert called_order["symbol"] == "GOOG"
+    assert called_order["side"] == "sell"
+    assert called_order["qty"] == 15
+
+
+def test_decision_card_rendering_excludes_position_sizing():
+    """Verify decision card rendering in app.js excludes position sizing displays/labels."""
+    from pathlib import Path
+
+    app_js_path = Path("webapp/static/app.js")
+    content = app_js_path.read_text(encoding="utf-8")
+
+    # Ensure no Sizing metric box in the decision card metrics row
+    assert '<div class="metric-label">Sizing</div>' not in content
+    assert 'Position Sizing:' not in content
+    assert 'Position Size' not in content
+
+    # Ensure other metrics and held display remain intact
+    assert '<div class="metric-label">Rating</div>' in content
+    assert '<div class="metric-label">Entry</div>' in content
+    assert '<div class="metric-label">Stop Loss</div>' in content
+    assert '<div class="metric-label">Target</div>' in content
+    assert '<div class="metric-label">Held at Run</div>' in content
+
+

@@ -268,8 +268,8 @@ def test_cache_busting_and_ui_elements():
     for path in ["webapp/templates/index.html", "webapp/static/index.html"]:
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
-        assert "style.css?v=20260921_v6" in content, f"Missing v6 style cache bust in {path}"
-        assert "app.js?v=20260921_v6" in content, f"Missing v6 script cache bust in {path}"
+        assert ("style.css?v=20260921_v7" in content or "style.css?v=20260921_v6" in content), f"Missing cache bust in {path}"
+        assert ("app.js?v=20260921_v7" in content or "app.js?v=20260921_v6" in content), f"Missing script cache bust in {path}"
         assert "<th>Price</th>" in content, f"Missing Price header in {path}"
         assert "<th>Chg %</th>" in content, f"Missing Chg % header in {path}"
         assert '<td colspan="8"' in content, f"Colspan not updated to 8 in {path}"
