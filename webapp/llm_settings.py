@@ -168,10 +168,11 @@ def apply_llm_config(config: dict[str, Any]) -> dict[str, Any]:
     for field, setting in TIER_SETTINGS.items():
         tier, suffix = field.split("_", 1)
         config[f"{tier}_think_{suffix}"] = (raw.get(setting, "") or "").strip()
-    if not provider:
+    if not provider and not any(config[f"{tier}_think_provider"] for tier in ("deep", "quick")):
         return config  # UI unconfigured -> rely on .env / DEFAULT_CONFIG
 
-    config["llm_provider"] = provider
+    if provider:
+        config["llm_provider"] = provider
     deep_model = (raw.get(SETTING_DEEP_MODEL, "") or "").strip()
     if deep_model:
         config["deep_think_llm"] = deep_model
@@ -188,7 +189,7 @@ def apply_llm_config(config: dict[str, Any]) -> dict[str, Any]:
         config["backend_url"] = None
 
     db_key = (raw.get(SETTING_API_KEY, "") or "").strip()
-    if db_key:
+    if db_key and provider:
         config["api_key"] = db_key
         env_name = PROVIDER_KEY_ENV.get(provider)
         if env_name:

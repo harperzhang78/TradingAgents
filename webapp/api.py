@@ -358,6 +358,9 @@ def update_llm_config(req: LLMConfigUpdateRequest) -> dict[str, Any]:
         # Switching provider: clear key/URL/models that belonged to the old provider.
         for k in (llm_settings.SETTING_API_KEY, llm_settings.SETTING_BASE_URL,
                   llm_settings.SETTING_DEEP_MODEL, llm_settings.SETTING_QUICK_MODEL):
+            tier = {llm_settings.SETTING_DEEP_MODEL: "deep", llm_settings.SETTING_QUICK_MODEL: "quick"}.get(k)
+            if tier and (get_setting(llm_settings.TIER_SETTINGS[f"{tier}_provider"]) or getattr(req, f"{tier}_provider")):
+                continue
             if get_setting(k) is not None:
                 set_setting(k, "")
     if req.api_key is not None:
@@ -373,6 +376,55 @@ def update_llm_config(req: LLMConfigUpdateRequest) -> dict[str, Any]:
         if value is not None:
             set_setting(setting, value.strip())
     return get_llm_config()
+
+
+@router.get("/llm-config/models")
+def list_llm_models(tier: Literal["deep", "quick"], provider: str | None = None,
+                    base_url: str | None = None, api_key: str | None = None,
+                    catalog_only: bool = False) -> dict[str, Any]:
+    """Discover endpoint models, falling back to the curated catalog."""
+    import httpx
+    import os
+    from tradingagents.llm_clients.model_catalog import get_model_options
+
+    saved = llm_settings.get_llm_config()
+    saved_provider = saved[f"{tier}_provider"] or saved["provider"]
+    provider = (provider or saved_provider).strip().lower()
+    base_url = (base_url if base_url is not None else saved[f"{tier}_base_url"] or saved["base_url"]).strip()
+    if api_key is None:
+        api_key = (saved[f"{tier}_api_key"] or saved["api_key"]) if provider == saved_provider else ""
+        env_name = llm_settings.PROVIDER_KEY_ENV.get(provider)
+        api_key = api_key or (os.environ.get(env_name, "") if env_name else "")
+    models = []
+    source = ""
+    compatible = set(llm_settings.LLM_PROVIDERS) - {"google", "anthropic", "bedrock"}
+    if not catalog_only and base_url and provider in compatible:
+        url = base_url.rstrip("/")
+        url = url.removesuffix("/v1") + "/api/tags" if provider == "ollama" else url + "/models"
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        if provider == "azure" and api_key:
+            headers.update({"api-key": api_key, "x-api-key": api_key})
+        try:
+            response = httpx.get(url, headers=headers, timeout=5.0)
+            response.raise_for_status()
+            items = response.json().get("models" if provider == "ollama" else "data", [])
+            for item in items:
+                model_id = item.get("name" if provider == "ollama" else "id")
+                if isinstance(model_id, str) and model_id and model_id != "custom":
+                    if not any(m["id"] == model_id for m in models):
+                        models.append({"id": model_id, "label": model_id})
+            if models:
+                source = "endpoint"
+        except Exception:
+            models = []
+    if not models:
+        try:
+            models = [{"id": value, "label": label} for label, value in get_model_options(provider, tier) if value != "custom"]
+            source = "catalog"
+        except KeyError:
+            pass
+    models.append({"id": "custom", "label": "Custom model ID"})
+    return {"models": models, "source": source}
 
 
 class LLMTestRequest(BaseModel):

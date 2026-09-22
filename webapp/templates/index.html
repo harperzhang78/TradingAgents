@@ -376,7 +376,7 @@
 
   <!-- Settings Modal -->
   <div id="settings-modal" class="modal-backdrop hidden">
-    <div class="modal modal-md">
+    <div class="modal modal-lg">
       <div class="modal-header">
         <h3>Settings</h3>
         <button id="settings-close" class="modal-close-btn">&times;</button>
@@ -435,74 +435,59 @@
         <!-- LLM Configuration -->
         <div class="llm-config-section">
           <div class="llm-config-header">
-            <span class="llm-config-title">🧠 LLM Provider</span>
-            <span class="llm-config-sub">Model backend used by all agents</span>
+            <span class="llm-config-title">🧠 LLM Settings</span>
+            <span class="llm-config-sub">Configure each model independently</span>
           </div>
-
-          <div class="form-group">
-            <label class="form-label" for="llm-provider">Provider</label>
-            <div class="form-desc">The Google provider uses a Google AI Studio API key. Other options use their respective API keys.</div>
-            <select id="llm-provider" class="form-select">
-              <option value="">Use .env default</option>
-              <option value="google">Google (Gemini / AI Studio)</option>
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic (Claude)</option>
-              <option value="xai">xAI (Grok)</option>
-              <option value="deepseek">DeepSeek</option>
-              <option value="qwen">Qwen (DashScope intl)</option>
-              <option value="qwen-cn">Qwen (China)</option>
-              <option value="glm">GLM (Z.AI)</option>
-              <option value="glm-cn">GLM (China)</option>
-              <option value="minimax">MiniMax</option>
-              <option value="minimax-cn">MiniMax (China)</option>
-              <option value="openrouter">OpenRouter</option>
-              <option value="mistral">Mistral</option>
-              <option value="kimi">Kimi (Moonshot)</option>
-              <option value="groq">Groq</option>
-              <option value="nvidia">NVIDIA (NIM)</option>
-              <option value="azure">Azure OpenAI</option>
-              <option value="bedrock">AWS Bedrock</option>
-              <option value="ollama">Ollama (local)</option>
-              <option value="openai_compatible">OpenAI-compatible (custom)</option>
-            </select>
-          </div>
-
-          <div class="form-group">
-            <label class="form-label" for="llm-api-key">API Key</label>
-            <div class="form-desc">Stored in the local dashboard DB. Leave blank to keep the current key or use one from <code>.env</code>.</div>
+          <fieldset class="form-group">
+            <legend>Deep-Think Model</legend>
+            <label class="form-label" for="llm-deep-provider">Provider</label>
+            <select id="llm-deep-provider" class="form-select"><option value="">Default provider</option></select>
+            <label class="form-label" for="llm-deep-api-key">API Key</label>
+            <div class="form-desc">Leave blank to keep a saved key. Clear removes the saved key.</div>
             <div class="input-action-row">
-              <input type="password" id="llm-api-key" class="form-input" placeholder="API key (optional if in .env)" autocomplete="off" />
-              <button id="btn-clear-api-key" class="btn btn-secondary hidden" type="button">Clear</button>
+              <input type="password" id="llm-deep-api-key" class="form-input" placeholder="API key" autocomplete="off" />
+              <button id="btn-clear-deep-api-key" class="btn btn-secondary" type="button">Clear</button>
             </div>
-          </div>
-
-          <div class="form-group">
-            <label class="form-label" for="llm-base-url">Base URL <span class="form-desc">(optional)</span></label>
-            <div class="form-desc">Override the provider default API endpoint (e.g. proxy, custom gateway). Leave blank to use the provider default.</div>
-            <input type="text" id="llm-base-url" class="form-input" placeholder="e.g. http://localhost:11434/v1" />
-          </div>
-
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label" for="llm-deep-model">Deep-Think Model</label>
-              <div class="form-desc">Research manager &amp; portfolio manager</div>
-              <input type="text" id="llm-deep-model" class="form-input" placeholder="e.g. gemini-3.1-pro-preview" />
+            <span id="llm-deep-key-status" class="form-desc"></span>
+            <label class="form-label" for="llm-deep-base-url">Base URL (entry point)</label>
+            <input type="text" id="llm-deep-base-url" class="form-input" placeholder="e.g. https://api.example.com/v1" />
+            <label class="form-label" for="llm-deep-model">Model</label>
+            <div class="input-action-row">
+              <input type="text" id="llm-deep-model" class="form-input" list="llm-deep-models" placeholder="Model ID" />
+              <button id="btn-refresh-deep" class="btn btn-secondary" type="button">Refresh</button>
             </div>
-            <div class="form-group">
-              <label class="form-label" for="llm-quick-model">Quick-Think Model</label>
-              <div class="form-desc">Analysts, trader &amp; debaters</div>
-              <input type="text" id="llm-quick-model" class="form-input" placeholder="e.g. gemini-3.8-flash" />
+            <datalist id="llm-deep-models"></datalist>
+            <span id="llm-deep-models-status" class="form-desc" role="status"></span>
+            <div class="llm-test-row">
+              <button id="btn-test-deep" class="btn btn-secondary" type="button">Test Deep</button>
+              <span id="llm-deep-test-result" class="llm-test-result" role="status"></span>
             </div>
-          </div>
-
-          <div class="llm-test-row">
-            <button id="btn-test-llm" class="btn btn-secondary" type="button">🔌 Test Connection</button>
-            <span id="llm-test-result" class="llm-test-result"></span>
-          </div>
-
-          <div class="info-alert mt-3">
-            ℹ️ The configured provider is applied to every analysis run. Changing it does not affect runs already in flight. Full multi-agent consensus runs can take minutes per ticker.
-          </div>
+          </fieldset>
+          <fieldset class="form-group">
+            <legend>Quick-Think Model</legend>
+            <label class="form-label" for="llm-quick-provider">Provider</label>
+            <select id="llm-quick-provider" class="form-select"><option value="">Default provider</option></select>
+            <label class="form-label" for="llm-quick-api-key">API Key</label>
+            <div class="form-desc">Leave blank to keep a saved key. Clear removes the saved key.</div>
+            <div class="input-action-row">
+              <input type="password" id="llm-quick-api-key" class="form-input" placeholder="API key" autocomplete="off" />
+              <button id="btn-clear-quick-api-key" class="btn btn-secondary" type="button">Clear</button>
+            </div>
+            <span id="llm-quick-key-status" class="form-desc"></span>
+            <label class="form-label" for="llm-quick-base-url">Base URL (entry point)</label>
+            <input type="text" id="llm-quick-base-url" class="form-input" placeholder="e.g. https://api.example.com/v1" />
+            <label class="form-label" for="llm-quick-model">Model</label>
+            <div class="input-action-row">
+              <input type="text" id="llm-quick-model" class="form-input" list="llm-quick-models" placeholder="Model ID" />
+              <button id="btn-refresh-quick" class="btn btn-secondary" type="button">Refresh</button>
+            </div>
+            <datalist id="llm-quick-models"></datalist>
+            <span id="llm-quick-models-status" class="form-desc" role="status"></span>
+            <div class="llm-test-row">
+              <button id="btn-test-quick" class="btn btn-secondary" type="button">Test Quick</button>
+              <span id="llm-quick-test-result" class="llm-test-result" role="status"></span>
+            </div>
+          </fieldset>
         </div>
       </div>
       <div class="modal-footer">

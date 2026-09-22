@@ -1836,3 +1836,12 @@ input:checked + .slider:before {
   color: var(--warning);
 }
 
+
+/* Keep model cards within the settings body's scroll area. */
+#settings-modal .modal-body { min-height: 0; min-width: 0; }
+.llm-config-section, .llm-config-section fieldset { box-sizing: border-box; width: 100%; min-width: 0; }
+.llm-config-section fieldset { margin: 0 0 1rem; padding: 1rem; border: 1px solid var(--border-color); border-radius: 8px; }
+.llm-config-section fieldset .form-label { display: block; margin-top: 0.75rem; }
+.llm-config-section .input-action-row { min-width: 0; }
+.llm-config-section .input-action-row input { flex: 1; min-width: 0; width: 0; }
+.llm-config-section .llm-test-row { flex-wrap: wrap; overflow-wrap: anywhere; }
