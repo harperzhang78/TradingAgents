@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+import socket
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from typing import Any, Generator
 
@@ -13,6 +15,7 @@ from pathlib import Path
 from webapp.config import (
     DATABASE_PATH,
     DEFAULT_AUTO_TRADE,
+    DEFAULT_PORT,
     DEFAULT_SCHEDULE_ENABLED,
     DEFAULT_SCHEDULE_INTERVAL_MINUTES,
     DEFAULT_WATCHLIST,
@@ -53,6 +56,32 @@ def get_db(db_path: Path | str | None = None) -> Generator[sqlite3.Connection, N
         raise
     finally:
         conn.close()
+
+
+def _server_port() -> int:
+    """Read the server port without parsing unrelated CLI arguments."""
+    for index, arg in enumerate(sys.argv[1:], start=1):
+        if arg == "--port" or arg.startswith("--port="):
+            try:
+                value = sys.argv[index + 1] if arg == "--port" else arg.split("=", 1)[1]
+                port = int(value)
+                if 0 <= port <= 65535:
+                    return port
+            except (IndexError, ValueError):
+                pass
+            return DEFAULT_PORT
+    return DEFAULT_PORT
+
+
+def _server_port_available() -> bool:
+    """Only allow cleanup when the server port can definitely be bound."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", _server_port()))
+    except OSError:
+        # An occupied port (or an inconclusive probe) must not interrupt live runs.
+        return False
+    return True
 
 
 def init_db(db_path: Path | str | None = None) -> None:
@@ -168,18 +197,20 @@ def init_db(db_path: Path | str | None = None) -> None:
                     (symbol.upper(), now_str, "Default watchlist entry"),
                 )
 
-        # Mark any stale runs that were running when the server shut down as failed/interrupted
-        now_iso = datetime.now(timezone.utc).isoformat()
-        cur.execute(
-            """
-            UPDATE runs
-            SET status = 'failed',
-                completed_at = ?,
-                error = 'Run interrupted: server restarted while execution was in progress'
-            WHERE status = 'running'
-            """,
-            (now_iso,),
-        )
+        # Uvicorn runs lifespan initialization before binding its listening socket.
+        # A second instance that cannot bind must not interrupt the serving instance.
+        if _server_port_available():
+            now_iso = datetime.now(timezone.utc).isoformat()
+            cur.execute(
+                """
+                UPDATE runs
+                SET status = 'failed',
+                    completed_at = ?,
+                    error = 'Run interrupted: server restarted while execution was in progress'
+                WHERE status = 'running'
+                """,
+                (now_iso,),
+            )
 
 
 # ---------------------------------------------------------------------------
