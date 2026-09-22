@@ -71,6 +71,7 @@ class SettingsUpdateRequest(BaseModel):
     auto_trade: bool | None = None
     schedule_enabled: bool | None = None
     schedule_interval_minutes: int | None = None
+    lang: str | None = None
 
 
 class LLMConfigUpdateRequest(BaseModel):
@@ -86,6 +87,7 @@ class RunTriggerRequest(BaseModel):
     all_watchlist: bool = False
     trade_date: str | None = None
     from_log_path: str | None = None
+    lang: str | None = None
 
 
 class ExecuteRecommendationRequest(BaseModel):
@@ -272,11 +274,14 @@ def update_watchlist(symbol: str, req: WatchlistUpdateRequest) -> dict[str, Any]
 @router.get("/settings")
 def get_settings() -> dict[str, Any]:
     raw = get_all_settings()
+    lang_val = raw.get("lang", "en").lower()
     return {
         "auto_trade": raw.get("auto_trade", "false").lower() in ("true", "1", "yes", "on"),
         "schedule_enabled": raw.get("schedule_enabled", "false").lower() in ("true", "1", "yes", "on"),
         "schedule_interval_minutes": int(raw.get("schedule_interval_minutes", "1440")),
         "last_scheduled_run": raw.get("last_scheduled_run", ""),
+        "lang": lang_val,
+        "output_language": "Chinese" if lang_val == "zh" else "English",
     }
 
 
@@ -288,6 +293,14 @@ def update_settings(req: SettingsUpdateRequest) -> dict[str, Any]:
         set_setting("schedule_enabled", "true" if req.schedule_enabled else "false")
     if req.schedule_interval_minutes is not None:
         set_setting("schedule_interval_minutes", str(req.schedule_interval_minutes))
+    if req.lang is not None:
+        clean_lang = req.lang.strip().lower()
+        if clean_lang in ("zh", "chinese", "cn"):
+            set_setting("lang", "zh")
+            set_setting("output_language", "Chinese")
+        else:
+            set_setting("lang", "en")
+            set_setting("output_language", "English")
     return get_settings()
 
 

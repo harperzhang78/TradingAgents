@@ -152,6 +152,8 @@ def init_db(db_path: Path | str | None = None) -> None:
             "schedule_enabled": "true" if DEFAULT_SCHEDULE_ENABLED else "false",
             "schedule_interval_minutes": str(DEFAULT_SCHEDULE_INTERVAL_MINUTES),
             "last_scheduled_run": "",
+            "lang": "en",
+            "output_language": "English",
         }
         for k, v in defaults.items():
             cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))

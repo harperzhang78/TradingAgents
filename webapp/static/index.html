@@ -25,6 +25,9 @@
       <!-- LLM provider badge (updated from /api/llm-config) -->
       <div id="llm-badge" class="badge llm-badge" title="Active LLM provider — click ⚙️ Settings to change">🧠 <span id="llm-badge-provider">…</span></div>
 
+      <!-- Language badge -->
+      <div id="lang-badge" class="badge" title="Active Analysis Language — click ⚙️ Settings to change">🌐 <span id="lang-badge-text">EN</span></div>
+
       <!-- Auto-trade toggle pill -->
       <div class="toggle-pill" id="auto-trade-container" title="Toggle automatic Alpaca order execution">
         <span class="toggle-label" id="auto-trade-label">Auto-Trade: OFF</span>
@@ -370,6 +373,17 @@
         </div>
 
         <div class="form-group mt-3">
+          <label class="form-label" for="settings-interval">Analysis Frequency</label>
+          <select id="settings-interval" class="form-select">
+            <option value="60">Every 1 Hour</option>
+            <option value="240">Every 4 Hours</option>
+            <option value="720">Every 12 Hours</option>
+            <option value="1440" selected>Daily (Every 24 Hours)</option>
+            <option value="2880">Every 2 Days</option>
+          </select>
+        </div>
+
+        <div class="form-group mt-3">
           <label class="form-label" for="settings-lang">Language / 输出语言 (Lang: en / zh)</label>
           <div class="form-desc">
             Select language for agent analysis, decision generation, rationales, and summary outputs. In Chinese (zh) mode, all generated decisions and rationales are produced in Chinese.
@@ -377,14 +391,6 @@
           <select id="settings-lang" class="form-select">
             <option value="en" selected>English (en)</option>
             <option value="zh">Chinese / 中文 (zh)</option>
-          </select>
-        </div>
-          <select id="settings-interval" class="form-select">
-            <option value="60">Every 1 Hour</option>
-            <option value="240">Every 4 Hours</option>
-            <option value="720">Every 12 Hours</option>
-            <option value="1440" selected>Daily (Every 24 Hours)</option>
-            <option value="2880">Every 2 Days</option>
           </select>
         </div>
 

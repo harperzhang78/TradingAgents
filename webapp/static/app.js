@@ -2,6 +2,22 @@
  * TradingAgents Dashboard Single Page Application
  */
 
+const LANG_STORAGE_KEY = 'tradingagents_lang';
+
+function getStoredLang() {
+  try {
+    return localStorage.getItem(LANG_STORAGE_KEY) || 'en';
+  } catch {
+    return 'en';
+  }
+}
+
+function setStoredLang(lang) {
+  try {
+    localStorage.setItem(LANG_STORAGE_KEY, lang);
+  } catch {}
+}
+
 const state = {
   account: null,
   watchlist: [],
@@ -13,6 +29,7 @@ const state = {
     auto_trade: false,
     schedule_enabled: false,
     schedule_interval_minutes: 1440,
+    lang: getStoredLang(),
   },
   runs: [],
   inFlightTickers: [],
@@ -91,8 +108,13 @@ function showToast(message, type = 'info') {
 
 async function api(path, options = {}) {
   try {
+    const lang = state?.settings?.lang || getStoredLang() || 'en';
     const res = await fetch(path, {
-      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Lang': lang,
+        ...(options.headers || {}),
+      },
       ...options,
     });
     if (!res.ok) {
@@ -147,7 +169,10 @@ async function loadStockQuotes() {
 
 async function fetchSettings() {
   try {
-    state.settings = await api('/api/settings');
+    const fetched = await api('/api/settings');
+    const lang = fetched.lang || state.settings?.lang || getStoredLang() || 'en';
+    state.settings = { ...fetched, lang };
+    setStoredLang(lang);
     renderSettings();
   } catch (err) {
     console.error('Settings fetch error:', err);
@@ -347,6 +372,17 @@ function renderSettings() {
     schedInfo.textContent = mins >= 60 ? `Schedule: Every ${mins / 60}h` : `Schedule: Every ${mins}m`;
   } else {
     schedInfo.textContent = 'Schedule: Manual (Off)';
+  }
+
+  // Update navbar language badge and modal select
+  const currentLang = state.settings?.lang || getStoredLang() || 'en';
+  const langBadgeText = document.getElementById('lang-badge-text');
+  if (langBadgeText) {
+    langBadgeText.textContent = currentLang.toUpperCase();
+  }
+  const langSelect = document.getElementById('settings-lang');
+  if (langSelect) {
+    langSelect.value = currentLang;
   }
 }
 
@@ -1071,7 +1107,10 @@ async function triggerSingleRun(symbol) {
   try {
     const res = await api('/api/runs', {
       method: 'POST',
-      body: JSON.stringify({ ticker: symbol }),
+      body: JSON.stringify({
+        ticker: symbol,
+        lang: state.settings?.lang || getStoredLang() || 'en',
+      }),
     });
     showToast(`Analysis started for ${symbol}`, 'success');
     await refreshAll();
@@ -1087,7 +1126,10 @@ async function triggerRunAllWatchlist() {
   try {
     const res = await api('/api/runs', {
       method: 'POST',
-      body: JSON.stringify({ all_watchlist: true }),
+      body: JSON.stringify({
+        all_watchlist: true,
+        lang: state.settings?.lang || getStoredLang() || 'en',
+      }),
     });
     showToast(`Triggered analysis on all active watchlist tickers`, 'success');
     await refreshAll();
@@ -1967,6 +2009,10 @@ function openSettingsModal() {
   document.getElementById('settings-auto-trade').checked = !!state.settings.auto_trade;
   document.getElementById('settings-sched-enabled').checked = !!state.settings.schedule_enabled;
   document.getElementById('settings-interval').value = String(state.settings.schedule_interval_minutes || 1440);
+  const langSelect = document.getElementById('settings-lang');
+  if (langSelect) {
+    langSelect.value = state.settings.lang || getStoredLang() || 'en';
+  }
   // Fill LLM config form from current effective config
   if (state.llmConfig) setLlmFormValues(state.llmConfig);
   // Reset test result
@@ -2020,6 +2066,9 @@ async function saveSettingsFromModal() {
   const autoTrade = document.getElementById('settings-auto-trade').checked;
   const schedEnabled = document.getElementById('settings-sched-enabled').checked;
   const interval = parseInt(document.getElementById('settings-interval').value, 10);
+  const langSelect = document.getElementById('settings-lang');
+  const lang = langSelect ? langSelect.value : (state.settings.lang || getStoredLang() || 'en');
+  setStoredLang(lang);
 
   // Blank keys preserve the saved key unless Clear was explicitly selected.
   const llmPayload = {};
@@ -2044,13 +2093,14 @@ async function saveSettingsFromModal() {
           auto_trade: autoTrade,
           schedule_enabled: schedEnabled,
           schedule_interval_minutes: interval,
+          lang: lang,
         }),
       }),
       (Object.keys(llmPayload).length > 0)
         ? api('/api/llm-config', { method: 'POST', body: JSON.stringify(llmPayload) })
         : Promise.resolve(null),
     ]);
-    state.settings = results[0];
+    state.settings = { ...results[0], lang: results[0]?.lang || lang };
     if (results[1]) state.llmConfig = results[1];
     renderSettings();
     renderLlmConfig();
@@ -2525,3 +2575,5 @@ window.autocompleteState = autocompleteState;
 window.fetchAutocompleteSuggestions = fetchAutocompleteSuggestions;
 window.selectAutocompleteItem = selectAutocompleteItem;
 window.closeAutocompleteDropdown = closeAutocompleteDropdown;
+window.getStoredLang = getStoredLang;
+window.setStoredLang = setStoredLang;
