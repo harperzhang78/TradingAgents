@@ -333,10 +333,11 @@ def build_order(
     decision: dict,
     account_equity: float,
     current_price: float | None = None,
+    held_qty: float | None = None,
 ) -> dict | None:
     """Map a parsed decision to an order spec dict.
 
-    Returns None if no order should be placed (Hold / ambiguous).
+    Returns None for Hold / ambiguous decisions or sells without long holdings.
     Keys in the returned dict:
       symbol, side ('buy'|'sell'), otype ('market'|'limit'),
       limit_price (float, for limit), notional (float, for market),
@@ -363,6 +364,9 @@ def build_order(
     if direction is None:
         return None
 
+    if direction == "sell" and (held_qty is None or held_qty <= 0):
+        return None
+
     # Sizing (default 5% of equity when the trader gave no parseable hint)
     notional = parse_position_sizing(decision.get("position_sizing"), account_equity)
 
@@ -374,6 +378,13 @@ def build_order(
     stop_price = decision.get("stop_loss")
     take_profit = decision.get("price_target")
 
+    # Quantity-based sells cannot exceed holdings, including market fallbacks.
+    market_sell_qty = None
+    if direction == "sell":
+        market_sell_qty = held_qty
+        if current_price and current_price > 0 and notional:
+            market_sell_qty = min(held_qty, max(1, int(notional / current_price)))
+
     # If current market price is unavailable (API failure), fall back to market order
     if current_price is None:
         logger.warning("⚠️ Current market price unavailable for %s — using market order", ticker)
@@ -381,9 +392,9 @@ def build_order(
             "symbol": ticker,
             "side": direction,
             "otype": "market",
-            "notional": round(notional, 2) if notional else None,
+            "notional": None if direction == "sell" else (round(notional, 2) if notional else None),
             "limit_price": None,
-            "qty": None,
+            "qty": market_sell_qty,
             "stop_price": None,
             "take_profit_price": None,
         }
@@ -394,9 +405,9 @@ def build_order(
             "symbol": ticker,
             "side": direction,
             "otype": "market",
-            "notional": round(notional, 2) if notional else None,
+            "notional": None if direction == "sell" else (round(notional, 2) if notional else None),
             "limit_price": None,
-            "qty": None,
+            "qty": market_sell_qty,
             "stop_price": None,
             "take_profit_price": None,
         }
@@ -412,9 +423,9 @@ def build_order(
             "symbol": ticker,
             "side": direction,
             "otype": "market",
-            "notional": round(notional, 2) if notional else None,
+            "notional": None if direction == "sell" else (round(notional, 2) if notional else None),
             "limit_price": None,
-            "qty": None,
+            "qty": market_sell_qty,
             "stop_price": None,
             "take_profit_price": None,
         }
@@ -497,6 +508,8 @@ def build_order(
             )
 
     qty = max(1, int(notional / ref_price)) if (notional and ref_price > 0) else 1
+    if direction == "sell":
+        qty = min(qty, held_qty)
     return {
         "symbol": ticker,
         "side": direction,
@@ -762,6 +775,20 @@ def execute_recommendation(
     acct_info = get_account_overview(client)
     account_equity = float(acct_info.get("equity", 100000.0))
 
+    positions = acct_info.get("positions", [])
+    pos = next(
+        (p for p in positions if str(p.get("symbol", "")).strip().upper() == ticker),
+        None,
+    )
+    held_qty = 0.0
+    if pos:
+        pos_side = str(pos.get("side", "")).lower()
+        if "short" not in pos_side:
+            try:
+                held_qty = float(pos.get("qty", 0.0))
+            except (ValueError, TypeError):
+                held_qty = 0.0
+
     actual_run_id = run_id or recommendation.get("run_id")
 
     # Check if there is an existing order record in DB for this run
@@ -781,7 +808,7 @@ def execute_recommendation(
     }
 
     current_price = fetch_last_close_price(ticker)
-    built_spec = build_order(ticker, decision, account_equity, current_price)
+    built_spec = build_order(ticker, decision, account_equity, current_price, held_qty=held_qty)
 
     # Start with built spec or create baseline
     if built_spec is not None:
@@ -859,19 +886,6 @@ def execute_recommendation(
 
     # Position validation check for sell orders: prevent selling unheld stocks
     if order_spec["side"] == "sell":
-        positions = acct_info.get("positions", [])
-        pos = next(
-            (p for p in positions if str(p.get("symbol", "")).strip().upper() == ticker),
-            None,
-        )
-        held_qty = 0.0
-        if pos:
-            pos_side = str(pos.get("side", "")).lower()
-            if "short" not in pos_side:
-                try:
-                    held_qty = float(pos.get("qty", 0.0))
-                except (ValueError, TypeError):
-                    held_qty = 0.0
 
         if held_qty <= 0:
             err_msg = f"Cannot sell {ticker}: you do not hold a position in {ticker}"
@@ -1039,7 +1053,9 @@ def execute(
 
     # -- Step 4: Build the order ----------------------------------------------
     print(f"\n📦 Building order...")
-    order = build_order(ticker, decision, equity, current_price)
+    held_qty = next((float(p.qty) for p in client.get_all_positions()
+                     if p.symbol.upper() == ticker.upper() and "short" not in str(p.side).lower()), 0.0)
+    order = build_order(ticker, decision, equity, current_price, held_qty=held_qty)
 
     if order is None:
         print("   → HOLD / REVIEW / ambiguous: no order placed.")

@@ -146,3 +146,25 @@ def test_constraint_text_is_unambiguous():
     # No template braces: it is embedded in ChatPromptTemplate strings, where
     # braces would be parsed as input variables.
     assert "{" not in NO_EXTERNAL_TOOLS and "}" not in NO_EXTERNAL_TOOLS
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('portfolio_context', [
+    'No current position in GOOG', 'Current position in GOOG: 10 units',
+])
+def test_trader_prompt_uses_position_conditional_actions(portfolio_context):
+    from tradingagents.agents.schemas import TraderAction, TraderProposal
+
+    captured = {}
+    llm = _capturing_llm(captured, TraderProposal(action=TraderAction.HOLD, reasoning='Avoid entry'))
+    create_trader(llm)({
+        'company_of_interest': 'GOOG',
+        'investment_plan': 'Underweight',
+        'market_report': '',
+        'portfolio_context': portfolio_context,
+    })
+    prompt = _prompt_text(captured['prompt'])
+    assert 'if there is no current position in this ticker' in prompt
+    assert 'avoid entry / do not open a new position' in prompt
+    assert 'set Action to Hold, not Sell' in prompt
+    assert 'If the caller has a position in this ticker, Underweight is a Sell' in prompt
