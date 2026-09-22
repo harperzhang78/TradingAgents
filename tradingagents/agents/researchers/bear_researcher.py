@@ -30,6 +30,8 @@ def create_bear_researcher(llm):
 
         prompt = f"""You are a Bear Analyst making the case against investing in the {target_label}. Your goal is to present a well-reasoned argument emphasizing risks, challenges, and negative indicators. Leverage the provided research and data to highlight potential downsides and counter bullish arguments effectively.
 
+Time horizon: The trader plans to hold for approximately 1 week. Frame your bear case around near-term risks, overhead resistance, and catalysts that could hit within 5 trading days.
+
 Key points to focus on:
 
 - Risks and Challenges: Highlight factors like market saturation, financial instability, or macroeconomic threats that could hinder the stock's performance.

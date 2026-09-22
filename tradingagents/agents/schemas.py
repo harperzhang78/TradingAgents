@@ -164,9 +164,8 @@ class TraderProposal(BaseModel):
     entry_price: float | None = Field(
         default=None,
         description=(
-            "Optional entry price target as an absolute number in the instrument's "
-            "quote currency (e.g. 189.5), never a percentage or a range. Omit it "
-            "if you cannot state a specific level."
+            "Optional. Only provide if you want to wait for a significantly better price "
+            "(e.g., a support level 5%+ below current). Omit for market-order execution (the default)."
         ),
     )
     stop_loss: float | None = Field(

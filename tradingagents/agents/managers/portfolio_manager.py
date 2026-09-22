@@ -44,6 +44,8 @@ def create_portfolio_manager(llm):
 
         prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
 
+Time horizon: 1 week (5 trading days). The investment thesis and executive summary should be framed for a short-term trade expected to resolve within a week.
+
 {instrument_context}
 
 {portfolio_context}

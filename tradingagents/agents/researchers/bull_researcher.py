@@ -30,6 +30,8 @@ def create_bull_researcher(llm):
 
         prompt = f"""You are a Bull Analyst advocating for investing in the {target_label}. Your task is to build a strong, evidence-based case emphasizing growth potential, competitive advantages, and positive market indicators. Leverage the provided research and data to address concerns and counter bearish arguments effectively.
 
+Time horizon: The trader plans to hold for approximately 1 week. Frame your bull case around catalysts and momentum that can materialize within 5 trading days.
+
 Key points to focus on:
 - Growth Potential: Highlight the company's market opportunities, revenue projections, and scalability.
 - Competitive Advantages: Emphasize factors like unique products, strong branding, or dominant market positioning.

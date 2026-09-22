@@ -38,6 +38,8 @@ def create_research_manager(llm):
 
 The debate always contains conflicting arguments; deciding which side is stronger is the job, so conflict alone is not a reason to Hold. Commit to the side with the stronger case, sized by how decisively it wins. Choose Hold only when the evidence is still balanced after that weighing, or too thin to support a call; do not manufacture a direction to appear decisive. Weigh the bull and bear cases on their merits, independent of which side spoke first or last.
 
+Time horizon: This is a short-term (1 week) trading decision. The strategic actions should be actionable within 5 trading days.
+
 ---
 
 **Debate History:**

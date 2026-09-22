@@ -142,6 +142,8 @@ def _build_system_message(
     """Assemble the sentiment-analyst system message with structured data blocks."""
     return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
 
+The trader's time horizon is 1 week. Frame your sentiment assessment as a near-term signal: is retail/institutional sentiment likely to support a price move within the next 5 trading days?
+
 ## Data sources (pre-fetched, in this prompt)
 
 ### News headlines — Yahoo Finance, past 7 days
