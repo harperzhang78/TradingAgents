@@ -1731,3 +1731,9 @@ input:checked + .slider:before {
   #logs-modal .modal-header-actions { width: 100%; }
   .modal-footer .btn { flex-basis: 100%; }
 }
+
+.badge-paused {
+  background-color: rgba(245, 158, 11, 0.15);
+  color: #F59E0B;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}

@@ -420,6 +420,28 @@ def stop_run_analysis(run_id: str) -> dict[str, Any]:
     return {"success": True, "run_id": run_id}
 
 
+@router.post("/runs/{run_id}/pause")
+def pause_run_analysis(run_id: str) -> dict[str, Any]:
+    if not runner.pause_run(run_id):
+        raise HTTPException(status_code=404, detail="Run is not in flight")
+    return {"success": True, "run_id": run_id}
+
+
+@router.post("/runs/{run_id}/resume")
+def resume_run_analysis(run_id: str) -> dict[str, Any]:
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run["status"] != "paused":
+        raise HTTPException(status_code=400, detail="Run is not paused")
+    if runner.is_ticker_running(run["ticker"]):
+        raise HTTPException(status_code=400, detail="Ticker is already in flight")
+    success, message = runner.resume_run(run_id, run["ticker"], run["trade_date"], run["trigger"])
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+    return {"success": True, "run_id": run_id}
+
+
 @router.delete("/runs/{run_id}")
 def delete_run_history(run_id: str) -> dict[str, Any]:
     run = get_run(run_id)

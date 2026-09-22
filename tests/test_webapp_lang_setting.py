@@ -1,5 +1,6 @@
 """Tests for webapp frontend Language (Lang) setting UI, persistence, and propagation."""
 from pathlib import Path
+from unittest.mock import Mock
 import pytest
 from fastapi.testclient import TestClient
 
@@ -76,3 +77,38 @@ def test_api_settings_lang_lifecycle():
     assert get_en.status_code == 200
     assert get_en.json()["lang"] == "en"
     assert get_en.json()["output_language"] == "English"
+
+
+@pytest.mark.parametrize("lang, expected", [("zh", "Chinese"), ("en", "English")])
+def test_runner_uses_saved_output_language(monkeypatch, lang, expected):
+    from tradingagents.default_config import DEFAULT_CONFIG
+    from tradingagents.graph import trading_graph
+    from webapp import runner as runner_module
+
+    default_language = DEFAULT_CONFIG["output_language"]
+    response = client.post("/api/settings", json={"lang": lang})
+    assert response.status_code == 200
+    assert db.get_all_settings()["output_language"] == expected
+
+    graph = Mock()
+    graph.return_value.propagate.return_value = ({"final_trade_decision": "HOLD"}, "HOLD")
+    monkeypatch.setattr(trading_graph, "TradingAgentsGraph", graph)
+    monkeypatch.setattr(runner_module, "get_alpaca_trading_client", lambda: None)
+    monkeypatch.setattr(runner_module, "get_account_overview", Mock(side_effect=RuntimeError("No account")))
+    monkeypatch.setattr(runner_module, "parse_trader_decision", lambda state: {"action": "HOLD"})
+    monkeypatch.setattr(runner_module, "is_auto_trade_enabled", lambda: False)
+
+    runner = runner_module.AnalysisRunner()
+    # Execute submitted jobs synchronously to exercise the normal start path.
+    monkeypatch.setattr(runner._executor, "submit", lambda fn, *args: fn(*args))
+    try:
+        run_id, success, _ = runner.start_analysis("AAPL", trade_date="2026-01-02")
+    finally:
+        runner._executor.shutdown(wait=True)
+
+    assert success
+    graph.assert_called_once()
+    assert graph.call_args.kwargs["config"]["output_language"] == expected
+    graph.return_value.propagate.assert_called_once()
+    assert db.get_run(run_id)["status"] == "advisory"
+    assert DEFAULT_CONFIG["output_language"] == default_language

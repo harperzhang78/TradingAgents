@@ -19,11 +19,16 @@ from webapp.db import (
     create_recommendation,
     create_run,
     get_active_watchlist,
+    get_all_settings,
+    get_run,
     insert_llm_calls,
     is_auto_trade_enabled,
     update_run_status,
 )
 from tradingagents.llm_clients.llm_trace import (
+    AnalysisCancelled,
+    AnalysisPaused,
+    set_run_interrupted_flag,
     get_captured,
     get_current_node,
     set_current_node,
@@ -45,10 +50,6 @@ from webapp.execution import (
 logger = logging.getLogger(__name__)
 
 
-class AnalysisCancelled(Exception):
-    """Cooperative cancellation at a step boundary."""
-
-
 class AnalysisRunner:
     """Manages background agent analysis tasks, locks per ticker, and streams logs."""
 
@@ -59,19 +60,59 @@ class AnalysisRunner:
         self._active_runs: dict[str, dict[str, Any]] = {}
 
     def stop_run(self, run_id: str) -> bool:
-        """Request cancellation after the current step finishes."""
+        """Request cooperative cancellation."""
         with self._lock:
             info = self._active_runs.get(run_id)
             if info is None:
                 return False
             info["cancelled"] = True
+            set_run_interrupted_flag(run_id, "cancelled", True)
+            return True
+
+    def pause_run(self, run_id: str) -> bool:
+        """Request cooperative pausing."""
+        with self._lock:
+            info = self._active_runs.get(run_id)
+            if info is None:
+                return False
+            info["paused"] = True
+            set_run_interrupted_flag(run_id, "paused", True)
             return True
 
     def _check_cancelled(self, run_id: str) -> None:
         with self._lock:
-            cancelled = self._active_runs.get(run_id, {}).get("cancelled", False)
-        if cancelled:
-            raise AnalysisCancelled()
+            info = self._active_runs.get(run_id, {})
+            if info.get("cancelled"):
+                raise AnalysisCancelled("Analysis cancelled by user")
+            if info.get("paused"):
+                raise AnalysisPaused("Analysis paused by user")
+
+    def resume_run(self, run_id: str, ticker: str, trade_date: str, trigger: str) -> tuple[bool, str]:
+        ticker = ticker.strip().upper()
+        with self._lock:
+            if ticker in self._in_flight_tickers or run_id in self._active_runs:
+                return False, f"Analysis for {ticker} is already in flight."
+            run = get_run(run_id)
+            if not run or run["status"] != "paused":
+                return False, "Run is not paused."
+            self._in_flight_tickers.add(ticker)
+            self._active_runs[run_id] = {
+                "ticker": ticker, "trade_date": trade_date, "trigger": trigger,
+                "started_at": run["started_at"],
+                "log_buffer": run.get("log_output") or "",
+                "cancelled": False, "paused": False,
+            }
+        try:
+            update_run_status(run_id, "running", completed_at=None)
+            self._log(run_id, "🔄 Resuming analysis...")
+            self._executor.submit(self._execute_job, run_id, ticker, trade_date, trigger)
+        except Exception:
+            with self._lock:
+                self._in_flight_tickers.discard(ticker)
+                self._active_runs.pop(run_id, None)
+            update_run_status(run_id, "paused", completed_at=run.get("completed_at"))
+            raise
+        return True, f"Resuming analysis for {ticker}"
 
     def is_ticker_running(self, ticker: str) -> bool:
         clean = ticker.strip().upper()
@@ -168,6 +209,7 @@ class AnalysisRunner:
                 "started_at": datetime.now(timezone.utc).isoformat(),
                 "log_buffer": "",
                 "cancelled": False,
+                "paused": False,
             }
 
         self._executor.submit(
@@ -280,6 +322,9 @@ class AnalysisRunner:
                 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
                 config = DEFAULT_CONFIG.copy()
+                settings = get_all_settings()
+                config["output_language"] = settings.get("output_language") or config["output_language"]
+                config["checkpoint_enabled"] = True
                 # Apply the LLM provider configured in the dashboard (takes precedence
                 # over .env / TRADINGAGENTS_* for the provider, key, and models).
                 apply_llm_config(config)
@@ -341,6 +386,16 @@ class AnalysisRunner:
             auto_trade = is_auto_trade_enabled()
             self._log(run_id, f"⚙️ Auto-trade toggle is currently: {'ENABLED (LIVE/PAPER SUBMISSION)' if auto_trade else 'DISABLED (ADVISORY ONLY)'}")
 
+            flat_sell = held_qty <= 0 and (
+                action == "SELL" or (action in ("HOLD", "") and rating in ("SELL", "UNDERWEIGHT"))
+            )
+            flat_sell_message = (
+                f"Skipped SELL order: Cannot sell {ticker} because you do not hold a position "
+                f"in {ticker} (0 shares held) — bearish view means avoid entry, no position to close."
+            )
+            if flat_sell:
+                self._log(run_id, f"⏸️ {flat_sell_message}")
+
             if not auto_trade:
                 # Advisory Mode active: Run remains in Advisory state, no order records created/generated
                 self._log(run_id, "ℹ️ Advisory Mode active: Auto-trade is OFF. Run remains in Advisory state (no order records generated).")
@@ -350,10 +405,10 @@ class AnalysisRunner:
             else:
                 # Fetch reference price if needed
                 current_market_price = fetch_last_close_price(ticker) if client else None
-                order_spec = build_order(ticker, decision, account_equity, current_market_price)
+                order_spec = build_order(ticker, decision, account_equity, current_market_price, held_qty=held_qty)
 
                 if order_spec is None:
-                    skip_msg = f"No order generated: Action '{action}' / Rating '{rating}' evaluated to HOLD/REVIEW."
+                    skip_msg = flat_sell_message if flat_sell else f"No order generated: Action '{action}' / Rating '{rating}' evaluated to HOLD/REVIEW."
                     self._log(run_id, f"⏸️ {skip_msg}")
                     create_order_record(
                         run_id=run_id,
@@ -369,26 +424,7 @@ class AnalysisRunner:
                         status="skipped",
                         skip_reason=skip_msg,
                     )
-                elif order_spec["side"] == "sell" and held_qty <= 0:
-                    skip_msg = f"Skipped SELL order: Cannot sell {ticker} because you do not hold a position in {ticker} (0 shares held)."
-                    self._log(run_id, f"⏸️ {skip_msg}")
-                    create_order_record(
-                        run_id=run_id,
-                        recommendation_id=rec_id,
-                        ticker=ticker,
-                        side="sell",
-                        order_type="none",
-                        qty=None,
-                        notional=None,
-                        limit_price=None,
-                        stop_price=None,
-                        take_profit_price=None,
-                        status="skipped",
-                        skip_reason=skip_msg,
-                    )
                 else:
-                    if order_spec["side"] == "sell" and held_qty > 0 and order_spec.get("qty"):
-                        order_spec["qty"] = min(int(order_spec["qty"]), int(held_qty))
                     self._log(
                         run_id,
                         f"📦 Order specification: {order_spec['side'].upper()} {order_spec['symbol']} "
@@ -442,8 +478,11 @@ class AnalysisRunner:
                 update_run_status(run_id, "completed", completed_at=completed_at)
                 self._log(run_id, "🎉 Analysis completed successfully.")
 
+        except AnalysisPaused:
+            self._log(run_id, "⏸️ Analysis paused at user request. State recorded.")
+            update_run_status(run_id, "paused", completed_at=datetime.now(timezone.utc).isoformat())
         except AnalysisCancelled:
-            self._log(run_id, "Analysis cancelled at user request.")
+            self._log(run_id, "🚫 Analysis cancelled at user request.")
             update_run_status(run_id, "cancelled", completed_at=datetime.now(timezone.utc).isoformat())
         except Exception as exc:
             tb = traceback.format_exc()

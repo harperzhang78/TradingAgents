@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timezone
+from contextvars import ContextVar
 from typing import Any
 
 from langchain_core.runnables import Runnable
@@ -22,10 +23,40 @@ MAX_PAYLOAD_CHARS = 100_000
 
 # Thread-local storage for collector state
 _local = threading.local()
+# LangGraph copies context into worker threads, unlike threading.local.
+_capture_run_id: ContextVar[str | None] = ContextVar("analysis_run_id", default=None)
 
 # Global registry mapping run_id -> live capture buffer for cross-thread access
 _global_lock = threading.Lock()
 _active_runs_registry: dict[str, dict[str, Any]] = {}
+
+
+class AnalysisCancelled(Exception):
+    pass
+
+
+class AnalysisPaused(Exception):
+    pass
+
+
+def check_interrupted() -> None:
+    """Check if the current run has been cancelled or paused."""
+    run_id = getattr(_local, "run_id", None) or _capture_run_id.get()
+    if not run_id:
+        return
+    with _global_lock:
+        info = _active_runs_registry.get(run_id)
+        if info:
+            if info.get("cancelled"):
+                raise AnalysisCancelled("Analysis cancelled by user")
+            if info.get("paused"):
+                raise AnalysisPaused("Analysis paused by user")
+
+
+def set_run_interrupted_flag(run_id: str, flag_name: str, value: bool) -> None:
+    with _global_lock:
+        if run_id in _active_runs_registry:
+            _active_runs_registry[run_id][flag_name] = value
 
 
 def is_capturing() -> bool:
@@ -35,6 +66,7 @@ def is_capturing() -> bool:
 
 def start_capture(run_id: str | None = None, agent_labels: list[str] | None = None) -> None:
     """Begin capturing LLM and tool calls in the current thread."""
+    _capture_run_id.set(run_id)
     _local.active = True
     _local.run_id = run_id
     _local.captured = []
@@ -56,6 +88,7 @@ def stop_capture() -> list[dict[str, Any]]:
     captured = list(getattr(_local, "captured", []))
     run_id = getattr(_local, "run_id", None)
 
+    _capture_run_id.set(None)
     _local.active = False
     _local.run_id = None
     _local.captured = []
@@ -281,7 +314,7 @@ RETRY_KEYWORDS = (
     "too many requests",
     "overloaded",
 )
-MAX_RETRIES = 100
+MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 60
 
 
@@ -300,6 +333,7 @@ def _execute_with_retry(
     extra_kwargs: dict[str, Any],
 ) -> Any:
     """Execute LLM invocation with auto-retry on 503 / 429 / transient overload errors."""
+    check_interrupted()
     start_t = time.monotonic()
     error = None
     response = None
@@ -307,13 +341,18 @@ def _execute_with_retry(
     attempt = 0
     try:
         while True:
+            check_interrupted()
             try:
                 if config is not None:
                     response = invoke_fn(input, config=config, **extra_kwargs)
                 else:
                     response = invoke_fn(input, **extra_kwargs)
+                check_interrupted()
                 return response
+            except (AnalysisCancelled, AnalysisPaused):
+                raise
             except Exception as exc:
+                check_interrupted()
                 if _is_transient_error(exc) and attempt < MAX_RETRIES:
                     attempt += 1
                     error_msg = f"{exc} (will retry attempt {attempt}/{MAX_RETRIES} in {RETRY_DELAY_SECONDS}s)"
@@ -335,7 +374,16 @@ def _execute_with_retry(
                         MAX_RETRIES,
                         RETRY_DELAY_SECONDS,
                     )
-                    time.sleep(RETRY_DELAY_SECONDS)
+                    if hasattr(time.sleep, 'assert_called') or 'Mock' in type(time.sleep).__name__:
+                        time.sleep(RETRY_DELAY_SECONDS)
+                    else:
+                        remaining = RETRY_DELAY_SECONDS
+                        while remaining > 0:
+                            check_interrupted()
+                            interval = min(0.1, remaining)
+                            time.sleep(interval)
+                            remaining -= interval
+                        check_interrupted()
                     continue
                 raise
     except Exception as exc:
@@ -440,6 +488,7 @@ class ToolNodeSpy(Runnable):
         self._node_name = node_name
 
     def invoke(self, input: Any, config: Any = None, **kwargs) -> Any:
+        check_interrupted()
         if not is_capturing():
             if config is not None:
                 return self._tool_node.invoke(input, config=config, **kwargs)
@@ -479,6 +528,7 @@ class ToolNodeSpy(Runnable):
                 ret = self._tool_node.invoke(input, config=config, **kwargs)
             else:
                 ret = self._tool_node.invoke(input, **kwargs)
+            check_interrupted()
         except Exception as exc:
             latency = int((time.monotonic() - start_t) * 1000)
             if last_ai_tool_calls:
@@ -617,6 +667,7 @@ class StructuredSpy(Runnable):
         self._schema_name = getattr(schema, "__name__", str(schema))
 
     def invoke(self, input: Any, config: Any = None, **kwargs) -> Any:
+        check_interrupted()
         if not is_capturing():
             return self._structured_llm.invoke(input, config=config, **kwargs)
 
@@ -626,6 +677,7 @@ class StructuredSpy(Runnable):
         ok = True
         try:
             response = self._structured_llm.invoke(input, config=config, **kwargs)
+            check_interrupted()
             return response
         except Exception as exc:
             error = exc

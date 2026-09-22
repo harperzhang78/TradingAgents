@@ -297,12 +297,12 @@ def test_503_retry_exhaustion_propagates_exception():
             with pytest.raises(Exception, match="503 UNAVAILABLE"):
                 spy.invoke("Run analysis")
 
-        # Must have attempted MAX_RETRIES sleeps (100 times)
+        # Must have attempted MAX_RETRIES sleeps (3 times)
         assert mock_sleep.call_count == MAX_RETRIES
 
         captured = stop_capture()
         llm_records = [c for c in captured if c.get("kind") == "llm"]
-        # 100 retry attempt records + 1 final failure record from finally block = 101 records
+        # 3 retry attempt records + 1 final failure record from finally block = 4 records
         assert len(llm_records) == MAX_RETRIES + 1
         assert all(c["ok"] is False for c in llm_records)
         assert "503 UNAVAILABLE" in str(llm_records[-1]["error"])

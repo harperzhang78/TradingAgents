@@ -44,7 +44,7 @@ def test_delete_run_cascades():
     assert db.delete_run("delete-me") is False
 
 
-@pytest.mark.parametrize("status", ["completed", "failed", "advisory"])
+@pytest.mark.parametrize("status", ["completed", "failed", "advisory", "paused", "cancelled"])
 def test_delete_run_api(status):
     seed_run("delete-me", status=status)
     response = client.delete("/api/runs/delete-me")

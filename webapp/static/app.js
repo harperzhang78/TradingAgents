@@ -52,6 +52,14 @@ window.state = state;
 // Helpers
 // ---------------------------------------------------------------------------
 
+function isAvoidEntry(rec) {
+  return Boolean(rec && (rec.action || '').trim().toUpperCase() === 'SELL' && !(rec.current_position_qty > 0));
+}
+
+function avoidEntryLabel() {
+  return state.settings.lang === 'zh' ? '避免入场（无持仓）' : 'Avoid Entry (no position)';
+}
+
 function formatCurrency(val) {
   if (val === null || val === undefined || isNaN(val)) return '$0.00';
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(val);
@@ -99,6 +107,28 @@ async function stopAnalysis(runId) {
   }
 }
 window.stopAnalysis = stopAnalysis;
+
+async function pauseAnalysis(runId) {
+  try {
+    await api(`/api/runs/${encodeURIComponent(runId)}/pause`, { method: 'POST' });
+    showToast('Pause requested.', 'success');
+    await refreshAll();
+  } catch (err) {
+    showToast(`Failed to pause analysis: ${err.message}`, 'error');
+  }
+}
+window.pauseAnalysis = pauseAnalysis;
+
+async function resumeAnalysis(runId) {
+  try {
+    await api(`/api/runs/${encodeURIComponent(runId)}/resume`, { method: 'POST' });
+    showToast('Resuming analysis...', 'success');
+    await refreshAll();
+  } catch (err) {
+    showToast(`Failed to resume analysis: ${err.message}`, 'error');
+  }
+}
+window.resumeAnalysis = resumeAnalysis;
 
 function formatStepDuration(seconds) {
   if (seconds === null || seconds === undefined || isNaN(seconds) || seconds < 0) return '';
@@ -668,7 +698,7 @@ function renderInFlightLiveConsole() {
                 ${f.call_count || 0} calls
               </span>
               <span class="badge badge-tag">${formatDuration(f.elapsed_seconds)}</span>
-              <button class="btn btn-danger btn-sm" onclick="stopAnalysis('${f.run_id}')">Stop</button>
+              <button class="btn btn-danger btn-sm" onclick="pauseAnalysis('${f.run_id}')">⏸️ Pause</button>
             </div>
           `;
         })
@@ -877,13 +907,14 @@ function renderRuns() {
       const rec = run.recommendation;
       const order = run.order;
       const isRunning = (run.status || '').toLowerCase() === 'running';
+      const isPaused = (run.status || '').toLowerCase() === 'paused';
       const isFailed = (run.status || '').toLowerCase() === 'failed';
       const isAdvisory = (run.status || '').toLowerCase() === 'advisory';
       const actionUpper = (rec && rec.action) ? rec.action.trim().toUpperCase() : '';
       const ratingUpper = (rec && rec.rating) ? rec.rating.trim().toUpperCase() : '';
       const isReview = ratingUpper === 'REVIEW';
       const isHold = (ratingUpper === 'HOLD' || ratingUpper === 'NEUTRAL') && actionUpper !== 'BUY' && actionUpper !== 'SELL';
-      const isNonActionable = isReview || isHold;
+      const isNonActionable = isReview || isHold || isAvoidEntry(rec);
       const reviewHint = isReview
         ? '<span class="text-muted text-xs">Requires manual review (non-actionable)</span>'
         : '<span class="text-muted text-xs">HOLD — no order will be placed</span>';
@@ -904,7 +935,7 @@ function renderRuns() {
       const hasRec = Boolean(rec && (rec.action || rec.rating || (rec.entry_price !== null && rec.entry_price !== undefined)));
       const hasOrder = Boolean(order && (orderSideUpper === 'BUY' || orderSideUpper === 'SELL'));
 
-      if (!isRunning && !isNonActionable && (hasRec || hasOrder || isAdvisory)) {
+      if (!isRunning && !isPaused && !isNonActionable && (hasRec || hasOrder || isAdvisory)) {
         canExecute = true;
         if (isSubmitted) {
           executeBtnLabel = '⚡ Re-execute Order';
@@ -921,6 +952,8 @@ function renderRuns() {
       let actionBadge = `<span class="badge">PENDING</span>`;
       if (isRunning) {
         actionBadge = `<span class="badge badge-running"><span class="spinner" style="width: 10px; height: 10px; margin-right: 4px;"></span> RUNNING</span>`;
+      } else if (isPaused) {
+        actionBadge = '<span class="badge badge-paused" style="background-color: rgba(245, 158, 11, 0.15); color: #F59E0B; border: 1px solid rgba(245, 158, 11, 0.4);">PAUSED</span>';
       } else if (run.status === 'cancelled') {
         actionBadge = '<span class="badge">CANCELLED</span>';
       } else if (isFailed && !rec) {
@@ -929,6 +962,8 @@ function renderRuns() {
         actionBadge = '<span class="badge badge-review">REVIEW</span>';
       } else if (isHold) {
         actionBadge = '<span class="badge badge-hold">HOLD</span>';
+      } else if (isAvoidEntry(rec)) {
+        actionBadge = `<span class="badge badge-hold">${escapeHtml(avoidEntryLabel())}</span>`;
       } else if (actionUpper || ratingUpper) {
         const displayAct = actionUpper || ratingUpper;
         if (displayAct === 'BUY' || displayAct === 'OVERWEIGHT') {
@@ -1075,13 +1110,14 @@ function renderRuns() {
             <button class="btn btn-primary btn-sm" onclick="openLogsModal('${run.id}', 'summary')">
               📋 Summary
             </button>
+            ${isPaused ? `<button class="btn btn-success btn-sm" onclick="resumeAnalysis('${run.id}')"><strong>▶ Resume</strong></button>` : ''}
             <button class="btn btn-secondary btn-sm" onclick="openLogsModal('${run.id}', 'llm-calls')">
               🤖 LLM Calls
             </button>
             <button class="btn btn-secondary btn-sm" onclick="openLogsModal('${run.id}', 'raw-log')">
               📜 Log
             </button>
-            ${isRunning ? `<button class="btn btn-danger btn-sm" onclick="stopAnalysis('${run.id}')">Stop Analysis</button>` : ''}
+            ${isRunning ? `<button class="btn btn-danger btn-sm" onclick="pauseAnalysis('${run.id}')">⏸️ Pause</button>` : ''}
             ${!isRunning ? `<button class="btn btn-danger btn-sm" onclick="deleteRun('${run.id}')" title="Delete run" aria-label="Delete run">🗑</button>` : ''}
           </div>
         </div>
@@ -1652,6 +1688,8 @@ async function updateModalData() {
               ? 'badge-buy'
               : (run.status || '').toLowerCase() === 'running'
               ? 'badge-running'
+              : (run.status || '').toLowerCase() === 'paused'
+              ? 'badge-paused'
               : (run.status || '').toLowerCase() === 'advisory'
               ? 'badge-hold'
               : 'badge-sell'
@@ -1660,7 +1698,7 @@ async function updateModalData() {
 
         // Update header execution button in Run Details modal
         const btnHeader = document.getElementById('modal-btn-confirm-execute');
-        if (run && !isReview && (run.status || '').toLowerCase() !== 'running') {
+        if (run && !isReview && !['running', 'paused'].includes((run.status || '').toLowerCase())) {
           const isSub = Boolean(run.order && run.order.status === 'submitted');
           const isErr = Boolean(run.order && run.order.status === 'failed');
           const btnLabel = isSub ? '⚡ Re-execute Order' : (isErr ? '⚡ Retry & Execute' : '⚡ Confirm & Execute');
@@ -1685,7 +1723,7 @@ async function updateModalData() {
           let recSummary = 'No recommendation produced yet.';
           if (run.recommendation) {
             recSummary = `Recommendation: <strong>${escapeHtml(
-              isReview ? 'REVIEW' : run.recommendation.action || 'HOLD'
+              isAvoidEntry(run.recommendation) ? avoidEntryLabel() : isReview ? 'REVIEW' : run.recommendation.action || 'HOLD'
             )}</strong> (${escapeHtml(run.recommendation.rating || 'N/A')}), Entry: ${formatCurrency(
               run.recommendation.entry_price
             )}, Target: ${formatCurrency(run.recommendation.price_target)}, Stop: ${formatCurrency(
