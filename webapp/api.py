@@ -23,7 +23,6 @@ from webapp.db import (
     get_runs,
     get_setting,
     get_watchlist,
-    has_submitted_order,
     remove_watchlist_item,
     remove_watchlist_items,
     set_setting,
@@ -395,8 +394,6 @@ def delete_run_history(run_id: str) -> dict[str, Any]:
         item["run_id"] == run_id for item in runner.get_in_flight_details()
     ):
         raise HTTPException(status_code=400, detail="Cannot delete a running run")
-    if has_submitted_order(run_id):
-        raise HTTPException(status_code=400, detail="Cannot delete a run with a submitted order")
     if not delete_run(run_id):
         raise HTTPException(status_code=404, detail="Run not found")
     return {"deleted": True, "run_id": run_id}

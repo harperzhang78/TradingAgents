@@ -911,7 +911,6 @@ function renderRuns() {
       let orderBoxHtml = '';
       if (order) {
         if (order.status === 'submitted') {
-          const canCancel = Boolean(order.alpaca_order_id);
           orderBoxHtml = `
           <div class="order-box order-box-submitted">
             <div>
@@ -920,7 +919,6 @@ function renderRuns() {
             </div>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
               <span class="badge badge-buy">SUBMITTED</span>
-              ${canCancel ? `<button class="btn btn-danger btn-sm" onclick="cancelRunOrder('${run.id}')" title="Cancel this order on Alpaca">✕ Cancel Order</button>` : ''}
               ${isReview ? reviewHint : `<button class="btn btn-confirm-reexecute btn-sm btn-confirm-execute" onclick="openExecuteModal('${run.id}')" title="Order was already submitted. Click to review or re-execute.">
                 ⚡ Re-execute
               </button>`}
@@ -1359,6 +1357,9 @@ async function deleteRun(runId) {
   try {
     await api(`/api/runs/${encodeURIComponent(runId)}`, { method: 'DELETE' });
     showToast(`Deleted ${run.ticker} run`, 'success');
+    if (state.activeModalRunId === runId) {
+      closeLogsModal();
+    }
     await refreshAll();
   } catch (err) {
     showToast(err.message, 'error');

@@ -84,10 +84,32 @@ def test_delete_submitted_run(newer_order):
             None, None, None, None, "failed",
         )
     response = client.delete("/api/runs/submitted")
-    assert response.status_code == 400
-    assert "submitted order" in response.json()["detail"]
-    assert db.get_run("submitted") is not None
+    assert response.status_code == 200
+    assert response.json() == {"deleted": True, "run_id": "submitted"}
+    assert db.get_run("submitted") is None
     with db.get_db() as conn:
         assert conn.execute(
             "SELECT COUNT(*) FROM orders WHERE run_id = 'submitted'",
-        ).fetchone()[0] == (2 if newer_order else 1)
+        ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("order_status", ["submitted", "skipped", "failed", "cancelled"])
+def test_delete_run_with_orders_allowed(order_status):
+    run_id = f"run-{order_status}"
+    seed_run(run_id, order_status=order_status)
+    response = client.delete(f"/api/runs/{run_id}")
+    assert response.status_code == 200
+    assert response.json() == {"deleted": True, "run_id": run_id}
+    assert db.get_run(run_id) is None
+    with db.get_db() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM orders WHERE run_id = ?", (run_id,),
+        ).fetchone()[0] == 0
+
+
+def test_no_cancel_order_button_on_decision_card():
+    from pathlib import Path
+    content = Path("webapp/static/app.js").read_text(encoding="utf-8")
+    # Verify decision cards do not render any cancel order button
+    assert "cancelRunOrder('${run.id}')" not in content
+    assert "✕ Cancel Order" not in content

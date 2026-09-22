@@ -263,13 +263,13 @@ def test_get_stock_quotes_api_resilient_on_error(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_cache_busting_and_ui_elements():
-    """Verify cache busting query parameter (v8 or earlier) is used in both HTML files and new columns/classes exist."""
+    """Verify cache busting query parameter (v9 or earlier) is used in both HTML files and new columns/classes exist."""
     # Check templates/index.html and static/index.html
     for path in ["webapp/templates/index.html", "webapp/static/index.html"]:
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
-        assert ("style.css?v=20260921_v8" in content or "style.css?v=20260921_v7" in content or "style.css?v=20260921_v6" in content), f"Missing cache bust in {path}"
-        assert ("app.js?v=20260921_v8" in content or "app.js?v=20260921_v7" in content or "app.js?v=20260921_v6" in content), f"Missing script cache bust in {path}"
+        assert ("style.css?v=20260921_v9" in content or "style.css?v=20260921_v8" in content or "style.css?v=20260921_v7" in content or "style.css?v=20260921_v6" in content), f"Missing cache bust in {path}"
+        assert ("app.js?v=20260921_v9" in content or "app.js?v=20260921_v8" in content or "app.js?v=20260921_v7" in content or "app.js?v=20260921_v6" in content), f"Missing script cache bust in {path}"
         assert "<th>Price</th>" in content, f"Missing Price header in {path}"
         assert "<th>Chg %</th>" in content, f"Missing Chg % header in {path}"
         assert '<td colspan="8"' in content, f"Colspan not updated to 8 in {path}"
@@ -290,4 +290,4 @@ def test_cache_busting_and_ui_elements():
     assert "window.cancelRunOrder = cancelRunOrder;" in js
     assert "window.loadStockQuotes = loadStockQuotes;" in js
     assert "chip-change" in js
-    assert "✕ Cancel Order" in js
+    assert "✕ Cancel Order" not in js
