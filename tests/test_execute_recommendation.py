@@ -853,8 +853,8 @@ def test_decision_card_rendering_excludes_position_sizing():
     # Ensure other metrics and held display remain intact
     assert '<div class="metric-label">Rating</div>' in content
     assert '<div class="metric-label">Entry</div>' in content
-    assert '<div class="metric-label">Stop Loss</div>' in content
+    assert '<div class="metric-label">Stop</div>' in content
     assert '<div class="metric-label">Target</div>' in content
-    assert '<div class="metric-label">Held at Run</div>' in content
+    assert '<div class="metric-label">Held</div>' in content
 
 

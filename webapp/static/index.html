@@ -52,22 +52,22 @@
     <!-- Stat Cards Overview -->
     <section class="stats-grid">
       <div class="stat-card">
-        <div class="stat-title">Portfolio Equity</div>
+        <div class="stat-title">Equity</div>
         <div class="stat-value" id="stat-equity">$0.00</div>
         <div class="stat-sub" id="stat-buying-power">BP: $0.00</div>
       </div>
       <div class="stat-card">
-        <div class="stat-title">Cash Balance</div>
+        <div class="stat-title">Cash</div>
         <div class="stat-value" id="stat-cash">$0.00</div>
         <div class="stat-sub" id="stat-account-status">Status: Active</div>
       </div>
       <div class="stat-card">
-        <div class="stat-title">Open Positions</div>
+        <div class="stat-title">Positions</div>
         <div class="stat-value" id="stat-positions-count">0</div>
         <div class="stat-sub">Alpaca Paper Holdings</div>
       </div>
       <div class="stat-card">
-        <div class="stat-title">Active Watchlist</div>
+        <div class="stat-title">Watchlist</div>
         <div class="stat-value" id="stat-watchlist-count">0</div>
         <div class="stat-sub" id="stat-schedule-info">Schedule: Daily</div>
       </div>
@@ -161,7 +161,7 @@
                     <th>Ticker</th>
                     <th>Price</th>
                     <th>Chg %</th>
-                    <th>Current Holding</th>
+                    <th>Holding</th>
                     <th>Notes</th>
                     <th class="text-right">Actions</th>
                   </tr>
@@ -178,7 +178,7 @@
         <div class="card mt-4">
           <div class="card-header">
             <div class="card-title">
-              <span>💼 Alpaca Current Positions</span>
+              <span>💼 Positions</span>
               <span class="badge" id="positions-badge">0 open</span>
             </div>
           </div>
@@ -191,8 +191,8 @@
                     <th>Shares</th>
                     <th>Avg Price</th>
                     <th>Current</th>
-                    <th>Market Value</th>
-                    <th>Unrealized P&L</th>
+                    <th>Value</th>
+                    <th>P&L</th>
                   </tr>
                 </thead>
                 <tbody id="positions-tbody">
@@ -207,7 +207,7 @@
         <div class="card mt-4" id="active-orders-card">
           <div class="card-header">
             <div class="card-title">
-              <span>📋 Active Orders</span>
+              <span>📋 Orders</span>
               <span class="badge" id="orders-badge">0 active</span>
             </div>
             <button id="btn-refresh-orders" class="btn btn-secondary btn-sm" title="Refresh active orders">
@@ -244,7 +244,7 @@
         <div class="card">
           <div class="card-header">
             <div class="card-title">
-              <span>🎯 Recommendations & Execution History</span>
+              <span>🎯 Recommendations</span>
             </div>
             <div class="filter-group">
               <button class="filter-btn active" data-filter="ALL">All</button>
@@ -269,7 +269,7 @@
     <div class="modal modal-lg">
       <div class="modal-header">
         <div class="modal-title-group">
-          <h3 id="modal-title">Run Details & Logs</h3>
+          <h3 id="modal-title">Run Details</h3>
           <span id="modal-status-badge" class="badge">...</span>
           <span id="modal-review-badge" class="badge badge-review hidden">REVIEW</span>
         </div>
@@ -340,12 +340,12 @@
   <div id="settings-modal" class="modal-backdrop hidden">
     <div class="modal modal-md">
       <div class="modal-header">
-        <h3>Configuration & Scheduler Settings</h3>
+        <h3>Settings</h3>
         <button id="settings-close" class="modal-close-btn">&times;</button>
       </div>
       <div class="modal-body">
         <div class="form-group">
-          <label class="form-label">Auto-Trade Execution Mode</label>
+          <label class="form-label">Auto-Trade</label>
           <div class="form-desc">
             When enabled, actionable trading recommendations (BUY/SELL) are automatically submitted to your Alpaca account (paper trading by default). When disabled, runs are advisory only.
           </div>
@@ -359,7 +359,7 @@
         </div>
 
         <div class="form-group mt-4">
-          <label class="form-label">Background Watchlist Scheduler</label>
+          <label class="form-label">Scheduler</label>
           <div class="form-desc">
             Automatically triggers multi-agent analysis on all active watchlist tickers at the specified interval.
           </div>
@@ -373,7 +373,7 @@
         </div>
 
         <div class="form-group mt-3">
-          <label class="form-label" for="settings-interval">Analysis Frequency</label>
+          <label class="form-label" for="settings-interval">Frequency</label>
           <select id="settings-interval" class="form-select">
             <option value="60">Every 1 Hour</option>
             <option value="240">Every 4 Hours</option>
@@ -506,22 +506,22 @@
               </select>
             </div>
             <div class="form-group">
-              <label class="form-label" for="exec-qty">Shares (Quantity)</label>
+              <label class="form-label" for="exec-qty">Shares</label>
               <input type="number" id="exec-qty" class="form-input" min="1" step="1" required />
             </div>
             <div class="form-group">
-              <label class="form-label" for="exec-limit">Limit Price ($)</label>
+              <label class="form-label" for="exec-limit">Limit ($)</label>
               <input type="number" id="exec-limit" class="form-input" min="0.01" step="0.01" required />
             </div>
           </div>
 
           <div class="form-row">
             <div class="form-group">
-              <label class="form-label" for="exec-stop">Stop Loss ($) <span class="form-desc">(optional)</span></label>
+              <label class="form-label" for="exec-stop">Stop ($) <span class="form-desc">(opt)</span></label>
               <input type="number" id="exec-stop" class="form-input" min="0.01" step="0.01" />
             </div>
             <div class="form-group">
-              <label class="form-label" for="exec-target">Take Profit ($) <span class="form-desc">(optional)</span></label>
+              <label class="form-label" for="exec-target">Target ($) <span class="form-desc">(opt)</span></label>
               <input type="number" id="exec-target" class="form-input" min="0.01" step="0.01" />
             </div>
           </div>

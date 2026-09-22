@@ -994,9 +994,9 @@ function renderRuns() {
         <div class="metrics-row">
           <div class="metric-box"><div class="metric-label">Rating</div><div class="metric-val">${rec.rating || 'N/A'}</div></div>
           <div class="metric-box"><div class="metric-label">Entry</div><div class="metric-val">${entry}</div></div>
-          <div class="metric-box"><div class="metric-label">Stop Loss</div><div class="metric-val">${stop}</div></div>
+          <div class="metric-box"><div class="metric-label">Stop</div><div class="metric-val">${stop}</div></div>
           <div class="metric-box"><div class="metric-label">Target</div><div class="metric-val">${target}</div></div>
-          <div class="metric-box"><div class="metric-label">Held at Run</div><div class="metric-val">${held}</div></div>
+          <div class="metric-box"><div class="metric-label">Held</div><div class="metric-val">${held}</div></div>
         </div>
       `;
       }
@@ -1008,7 +1008,7 @@ function renderRuns() {
           orderBoxHtml = `
           <div class="order-box order-box-submitted">
             <div>
-              <strong>Order Executed:</strong> ${order.side.toUpperCase()} ${order.qty || ''} shares @ ${order.limit_price ? formatCurrency(order.limit_price) : 'MKT'}
+              <strong>Executed:</strong> ${order.side.toUpperCase()} ${order.qty || ''} shares @ ${order.limit_price ? formatCurrency(order.limit_price) : 'MKT'}
               <span class="text-xs">(${order.order_type.toUpperCase()} • Bracket • Alpaca ID: ${order.alpaca_order_id || 'Submitted'})</span>
             </div>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
@@ -1023,7 +1023,7 @@ function renderRuns() {
           orderBoxHtml = `
           <div class="order-box order-box-skipped">
             <div>
-              <strong>Order Cancelled:</strong> ${order.side ? order.side.toUpperCase() : ''} ${order.qty || ''} shares (Alpaca ID: ${order.alpaca_order_id || 'Cancelled'})
+              <strong>Cancelled:</strong> ${order.side ? order.side.toUpperCase() : ''} ${order.qty || ''} shares (Alpaca ID: ${order.alpaca_order_id || 'Cancelled'})
             </div>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
               <span class="badge">CANCELLED</span>
@@ -1051,7 +1051,7 @@ function renderRuns() {
           orderBoxHtml = `
           <div class="order-box order-box-failed">
             <div>
-              <strong>Order Error:</strong> ${escapeHtml(order.error_message || 'Submission failed')}
+              <strong>Error:</strong> ${escapeHtml(order.error_message || 'Submission failed')}
             </div>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
               <span class="badge badge-sell">FAILED</span>
@@ -1068,7 +1068,7 @@ function renderRuns() {
         orderBoxHtml = `
         <div class="order-box order-box-advisory">
           <div>
-            <strong>Advisory Mode:</strong> Recommendation ready for review (no order submitted yet)
+            <strong>Advisory:</strong> Recommendation ready for review (no order submitted yet)
           </div>
           <div style="display: flex; gap: 0.5rem; align-items: center;">
             <span class="badge badge-hold">ADVISORY</span>
@@ -1085,7 +1085,7 @@ function renderRuns() {
       if (rec && rec.reasoning) {
         reasoningHtml = `
         <div class="reasoning-box">
-          <strong>Trader Rationale:</strong> ${escapeHtml(rec.reasoning)}
+          <strong>Rationale:</strong> ${escapeHtml(rec.reasoning)}
         </div>
       `;
       } else if (run.error) {
@@ -1104,7 +1104,7 @@ function renderRuns() {
             ${actionBadge}
             ${isAdvisory ? '<span class="badge badge-hold">ADVISORY</span>' : ''}
             <span class="run-meta">• ${formatDate(run.started_at)} • ${run.trigger}</span>
-            <span class="run-meta">Total time: ${formatDuration(run.duration_seconds)}</span>
+            <span class="run-meta">Total: ${formatDuration(run.duration_seconds)}</span>
           </div>
           <div class="run-card-actions" style="display: flex; gap: 0.35rem; align-items: center;">
             <button class="btn btn-primary btn-sm" onclick="openLogsModal('${run.id}', 'summary')">
@@ -1732,13 +1732,13 @@ async function updateModalData() {
           }
           let orderSummary = '';
           if (run.order) {
-            orderSummary = `<br>Order Execution: ${escapeHtml(
+            orderSummary = `<br>Order: ${escapeHtml(
               (run.order.status || '').toUpperCase()
             )} (${escapeHtml(
               run.order.skip_reason || run.order.alpaca_order_id || 'Submitted'
             )})`;
           } else if ((run.status || '').toLowerCase() === 'advisory') {
-            orderSummary = '<br>Order Execution: <strong>ADVISORY</strong> (No order generated; auto-trade disabled)';
+            orderSummary = '<br>Order: <strong>ADVISORY</strong> (No order generated; auto-trade disabled)';
           }
           summaryBox.innerHTML = `<strong>Status:</strong> ${escapeHtml(
             (run.status || '').toUpperCase()
@@ -1846,9 +1846,9 @@ function renderModalSummary() {
   if (overallMeta) {
     const count = Array.isArray(state.activeModalCalls) ? state.activeModalCalls.length : 0;
     overallMeta.innerHTML = `
-      <span>Confidence: <strong class="badge badge-paper">${escapeHtml(sum.confidence || 'Neutral')}</strong></span>
+      <span>Conf: <strong class="badge badge-paper">${escapeHtml(sum.confidence || 'Neutral')}</strong></span>
       <span>•</span>
-      <span>${count} LLM &amp; Tool Calls Recorded</span>
+      <span>${count} LLM Calls</span>
     `;
   }
 
@@ -1915,7 +1915,7 @@ function renderModalSummary() {
         if (step.key_find && !step.key_find.toLowerCase().startsWith('in progress')) {
           findingBox = `
             <div class="key-find-box">
-              <span class="text-dim text-xs" style="text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 2px;">Key Finding</span>
+              <span class="text-dim text-xs" style="text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 2px;">Finding</span>
               <span class="key-find-quote">"${escapeHtml(step.key_find)}"</span>
             </div>
           `;
@@ -1930,7 +1930,7 @@ function renderModalSummary() {
       } else if (step.key_find) {
         findingBox = `
           <div class="key-find-box">
-            <span class="text-dim text-xs" style="text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 2px;">Key Finding</span>
+            <span class="text-dim text-xs" style="text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 2px;">Finding</span>
             <span class="key-find-quote">"${escapeHtml(step.key_find)}"</span>
           </div>
         `;
@@ -2317,8 +2317,8 @@ function openExecuteModal(runId) {
     <div class="metric-box"><div class="metric-label">Ticker</div><div class="metric-val">${ticker}</div></div>
     <div class="metric-box"><div class="metric-label">Side</div><div class="metric-val" id="exec-modal-side-metric" style="color: ${side === 'buy' ? '#10B981' : '#EF4444'}">${side.toUpperCase()}</div></div>
     <div class="metric-box"><div class="metric-label">Rating</div><div class="metric-val">${(rec && rec.rating) || 'N/A'}</div></div>
-    <div class="metric-box"><div class="metric-label">Entry Limit</div><div class="metric-val">${entryFormatted}</div></div>
-    <div class="metric-box"><div class="metric-label">Stop Loss</div><div class="metric-val">${stopFormatted}</div></div>
+    <div class="metric-box"><div class="metric-label">Entry</div><div class="metric-val">${entryFormatted}</div></div>
+    <div class="metric-box"><div class="metric-label">Stop</div><div class="metric-val">${stopFormatted}</div></div>
     <div class="metric-box"><div class="metric-label">Target</div><div class="metric-val">${targetFormatted}</div></div>
     <div class="metric-box"><div class="metric-label">Est. Value</div><div class="metric-val">${estTotalFormatted}</div></div>
   `;
