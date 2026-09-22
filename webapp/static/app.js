@@ -81,6 +81,25 @@ function formatDate(isoStr) {
   }
 }
 
+function formatDuration(seconds) {
+  if (seconds === null || seconds === undefined || !Number.isFinite(Number(seconds))) return 'N/A';
+  const total = Math.max(0, Math.floor(Number(seconds)));
+  if (total < 60) return `${total}s`;
+  if (total < 3600) return `${Math.floor(total / 60)}m ${total % 60}s`;
+  return `${Math.floor(total / 3600)}h ${Math.floor((total % 3600) / 60)}m`;
+}
+
+async function stopAnalysis(runId) {
+  try {
+    await api(`/api/runs/${encodeURIComponent(runId)}/stop`, { method: 'POST' });
+    showToast('Stop requested. Analysis will stop after the current step.', 'success');
+    await refreshAll();
+  } catch (err) {
+    showToast(`Failed to stop analysis: ${err.message}`, 'error');
+  }
+}
+window.stopAnalysis = stopAnalysis;
+
 function formatStepDuration(seconds) {
   if (seconds === null || seconds === undefined || isNaN(seconds) || seconds < 0) return '';
   const totalSec = Math.round(seconds);
@@ -648,6 +667,8 @@ function renderInFlightLiveConsole() {
               <span${callsBadgeId} class="badge badge-tag" style="border-color: ${color.border};">
                 ${f.call_count || 0} calls
               </span>
+              <span class="badge badge-tag">${formatDuration(f.elapsed_seconds)}</span>
+              <button class="btn btn-danger btn-sm" onclick="stopAnalysis('${f.run_id}')">Stop</button>
             </div>
           `;
         })
@@ -900,6 +921,8 @@ function renderRuns() {
       let actionBadge = `<span class="badge">PENDING</span>`;
       if (isRunning) {
         actionBadge = `<span class="badge badge-running"><span class="spinner" style="width: 10px; height: 10px; margin-right: 4px;"></span> RUNNING</span>`;
+      } else if (run.status === 'cancelled') {
+        actionBadge = '<span class="badge">CANCELLED</span>';
       } else if (isFailed && !rec) {
         actionBadge = `<span class="badge badge-sell">FAILED</span>`;
       } else if (isReview) {
@@ -1046,6 +1069,7 @@ function renderRuns() {
             ${actionBadge}
             ${isAdvisory ? '<span class="badge badge-hold">ADVISORY</span>' : ''}
             <span class="run-meta">• ${formatDate(run.started_at)} • ${run.trigger}</span>
+            <span class="run-meta">Total time: ${formatDuration(run.duration_seconds)}</span>
           </div>
           <div class="run-card-actions" style="display: flex; gap: 0.35rem; align-items: center;">
             <button class="btn btn-primary btn-sm" onclick="openLogsModal('${run.id}', 'summary')">
@@ -1057,6 +1081,7 @@ function renderRuns() {
             <button class="btn btn-secondary btn-sm" onclick="openLogsModal('${run.id}', 'raw-log')">
               📜 Log
             </button>
+            ${isRunning ? `<button class="btn btn-danger btn-sm" onclick="stopAnalysis('${run.id}')">Stop Analysis</button>` : ''}
             ${!isRunning ? `<button class="btn btn-danger btn-sm" onclick="deleteRun('${run.id}')" title="Delete run" aria-label="Delete run">🗑</button>` : ''}
           </div>
         </div>

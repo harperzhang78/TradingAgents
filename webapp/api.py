@@ -371,7 +371,22 @@ def list_runs(
     limit: int = Query(default=50, ge=1, le=200),
     ticker: str | None = None,
 ) -> list[dict[str, Any]]:
-    return get_runs(limit=limit, ticker=ticker)
+    runs = get_runs(limit=limit, ticker=ticker)
+    now = datetime.now(timezone.utc)
+    for run in runs:
+        run["duration_seconds"] = None
+        if run.get("started_at"):
+            start = datetime.fromisoformat(run["started_at"])
+            start = start.replace(tzinfo=timezone.utc) if start.tzinfo is None else start
+            end = None
+            if run.get("completed_at"):
+                end = datetime.fromisoformat(run["completed_at"])
+            elif run["status"] == "running":
+                end = now
+            if end is not None:
+                end = end.replace(tzinfo=timezone.utc) if end.tzinfo is None else end
+                run["duration_seconds"] = (end - start).total_seconds()
+    return runs
 
 
 @router.get("/runs/in-flight")
@@ -396,6 +411,13 @@ def get_run_detail(run_id: str) -> dict[str, Any]:
     if len(mem_log) > len(current_logs):
         run["log_output"] = mem_log
     return run
+
+
+@router.post("/runs/{run_id}/stop")
+def stop_run_analysis(run_id: str) -> dict[str, Any]:
+    if not runner.stop_run(run_id):
+        raise HTTPException(status_code=404, detail="Run is not in flight")
+    return {"success": True, "run_id": run_id}
 
 
 @router.delete("/runs/{run_id}")

@@ -45,6 +45,10 @@ from webapp.execution import (
 logger = logging.getLogger(__name__)
 
 
+class AnalysisCancelled(Exception):
+    """Cooperative cancellation at a step boundary."""
+
+
 class AnalysisRunner:
     """Manages background agent analysis tasks, locks per ticker, and streams logs."""
 
@@ -53,6 +57,21 @@ class AnalysisRunner:
         self._lock = threading.Lock()
         self._in_flight_tickers: set[str] = set()
         self._active_runs: dict[str, dict[str, Any]] = {}
+
+    def stop_run(self, run_id: str) -> bool:
+        """Request cancellation after the current step finishes."""
+        with self._lock:
+            info = self._active_runs.get(run_id)
+            if info is None:
+                return False
+            info["cancelled"] = True
+            return True
+
+    def _check_cancelled(self, run_id: str) -> None:
+        with self._lock:
+            cancelled = self._active_runs.get(run_id, {}).get("cancelled", False)
+        if cancelled:
+            raise AnalysisCancelled()
 
     def is_ticker_running(self, ticker: str) -> bool:
         clean = ticker.strip().upper()
@@ -91,6 +110,13 @@ class AnalysisRunner:
                     if not c_dict.get("ticker"):
                         c_dict["ticker"] = ticker_sym
                     formatted_calls.append(c_dict)
+            started_at = info.get("started_at")
+            elapsed_seconds = None
+            if started_at:
+                start = datetime.fromisoformat(started_at)
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=timezone.utc)
+                elapsed_seconds = (datetime.now(timezone.utc) - start).total_seconds()
             details.append({
                 "run_id": rid,
                 "ticker": ticker_sym,
@@ -100,6 +126,7 @@ class AnalysisRunner:
                 "call_count": len(live_calls),
                 "latest_calls": formatted_calls,
                 "started_at": info.get("started_at"),
+                "elapsed_seconds": elapsed_seconds,
             })
         return details
 
@@ -140,6 +167,7 @@ class AnalysisRunner:
                 "trigger": trigger,
                 "started_at": datetime.now(timezone.utc).isoformat(),
                 "log_buffer": "",
+                "cancelled": False,
             }
 
         self._executor.submit(
@@ -192,6 +220,8 @@ class AnalysisRunner:
         try:
             self._log(run_id, f"🚀 Initializing run {run_id[:8]} for {ticker} (Date: {trade_date}, Trigger: {trigger})")
 
+            self._check_cancelled(run_id)
+
             # 1. Alpaca account & holdings context
             self._log(run_id, "🔍 Connecting to Alpaca to fetch current account & position context...")
             acct_info = None
@@ -226,8 +256,12 @@ class AnalysisRunner:
             except Exception as alpaca_err:
                 self._log(run_id, f"⚠️ Warning: Alpaca context lookup failed: {alpaca_err}")
 
+            self._check_cancelled(run_id)
+
             # 2. Build PortfolioContext for TradingAgents
             portfolio_ctx = get_alpaca_portfolio_context(client) if client else None
+
+            self._check_cancelled(run_id)
 
             # 3. Run TradingAgents pipeline or load from log
             final_state = None
@@ -253,8 +287,14 @@ class AnalysisRunner:
                 ta = TradingAgentsGraph(config=config)
 
                 self._log(run_id, "🤖 Executing agent consensus debate and risk management...")
-                final_state, signal = ta.propagate(ticker, trade_date, portfolio=portfolio_ctx)
+                self._check_cancelled(run_id)
+                final_state, signal = ta.propagate(
+                    ticker, trade_date, portfolio=portfolio_ctx,
+                    check_cancelled=lambda: self._check_cancelled(run_id),
+                )
                 self._log(run_id, f"✨ Graph execution completed with consensus signal: {signal}")
+
+            self._check_cancelled(run_id)
 
             # 4. Parse decision
             self._log(run_id, "📋 Parsing structured recommendation...")
@@ -274,6 +314,8 @@ class AnalysisRunner:
                 f"Target=${price_target if price_target else 0:.2f}, Sizing={sizing or 'default'}",
             )
 
+            self._check_cancelled(run_id)
+
             # 5. Persist recommendation in SQLite
             rec_id = create_recommendation(
                 run_id=run_id,
@@ -292,6 +334,8 @@ class AnalysisRunner:
                 trader_investment_plan=final_state.get("trader_investment_plan"),
             )
             self._log(run_id, f"💾 Stored recommendation #{rec_id} in database.")
+
+            self._check_cancelled(run_id)
 
             # 6. Check auto-trade status and place or skip order
             auto_trade = is_auto_trade_enabled()
@@ -355,6 +399,7 @@ class AnalysisRunner:
 
                     if client is None:
                         client = get_alpaca_trading_client()
+                    self._check_cancelled(run_id)
                     self._log(run_id, "🚀 Submitting order to Alpaca...")
                     try:
                         submitted = submit_alpaca_order(order_spec, client=client)
@@ -397,6 +442,9 @@ class AnalysisRunner:
                 update_run_status(run_id, "completed", completed_at=completed_at)
                 self._log(run_id, "🎉 Analysis completed successfully.")
 
+        except AnalysisCancelled:
+            self._log(run_id, "Analysis cancelled at user request.")
+            update_run_status(run_id, "cancelled", completed_at=datetime.now(timezone.utc).isoformat())
         except Exception as exc:
             tb = traceback.format_exc()
             self._log(run_id, f"💥 Execution error: {exc}\n{tb}")
