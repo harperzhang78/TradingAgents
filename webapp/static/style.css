@@ -1387,7 +1387,19 @@ input:checked + .slider:before {
   margin-top: 0.25rem;
 }
 .key-find-quote {
+  display: block;
+  max-height: 160px;
+  overflow-y: auto;
+  white-space: normal;
+  word-break: break-word;
   font-style: italic;
+}
+.key-find-quote::-webkit-scrollbar {
+  width: 5px;
+}
+.key-find-quote::-webkit-scrollbar-thumb {
+  background: var(--border-highlight);
+  border-radius: 3px;
 }
 .step-meta-pills {
   display: flex;

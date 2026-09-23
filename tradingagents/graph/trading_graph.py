@@ -170,10 +170,18 @@ class TradingAgentsGraph:
         key = self.config.get(f"{tier}_think_api_key") or self.config.get("api_key")
         if key:
             kwargs["api_key"] = key
+        tier_base = (self.config.get(f"{tier}_think_base_url") or "").strip() or None
+        tier_provider = (self.config.get(f"{tier}_think_provider") or "").strip()
+        if tier_base:
+            base_url = tier_base
+        elif tier_provider:
+            base_url = None  # own provider, no explicit URL → use native default
+        else:
+            base_url = self.config.get("backend_url") or None
         return create_llm_client(
             provider=provider,
             model=self.config[f"{tier}_think_llm"],
-            base_url=self.config.get(f"{tier}_think_base_url") or self.config.get("backend_url"),
+            base_url=base_url,
             **kwargs,
         )
 

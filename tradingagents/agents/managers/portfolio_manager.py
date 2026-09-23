@@ -52,12 +52,13 @@ Time horizon: 1 week (5 trading days). The investment thesis and executive summa
 
 ---
 
-**Rating Scale** (use exactly one):
-- **Buy**: Strong conviction to enter or add to position
-- **Overweight**: Favorable outlook, gradually increase exposure
-- **Hold**: Maintain current position, no action needed
-- **Underweight**: Reduce exposure, take partial profits
-- **Sell**: Exit position or avoid entry
+**Rating Scale** (use exactly one — this is your investment VIEW, not a trade instruction;
+the Trade Action is decided separately by the Trader based on the caller's actual position):
+- **Buy**: Strong bullish conviction
+- **Overweight**: Moderately bullish
+- **Hold**: Neutral / no clear edge
+- **Underweight**: Moderately bearish
+- **Sell**: Strong bearish conviction
 
 **Context:**
 - Research Manager's investment plan: **{research_plan}**

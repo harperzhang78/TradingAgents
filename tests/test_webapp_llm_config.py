@@ -145,3 +145,237 @@ def test_graph_clients_resolve_tiers_independently(monkeypatch):
     factory.assert_called_with(provider='openai', model='quick-model', api_key='shared-key',
                                base_url='https://shared.example', max_tokens=123,
                                reasoning_effort='medium')
+
+
+def test_graph_tier_with_own_provider_and_empty_base_url_does_not_inherit_backend_url(monkeypatch):
+    from tradingagents.graph import trading_graph
+    graph = trading_graph.TradingAgentsGraph.__new__(trading_graph.TradingAgentsGraph)
+    graph.callbacks = []
+    graph.config = {
+        'llm_provider': 'openai_compatible',
+        'backend_url': 'http://192.168.1.37:8000/v1',
+        'deep_think_llm': 'gemini-3.8-flash',
+        'deep_think_provider': 'google',
+        'deep_think_base_url': '',
+    }
+    factory = Mock()
+    monkeypatch.setattr(trading_graph, 'create_llm_client', factory)
+    graph._create_tier_client('deep')
+    assert factory.call_args.kwargs['base_url'] is None
+    factory.assert_called_with(provider='google', model='gemini-3.8-flash', base_url=None)
+
+
+def test_list_llm_models_google_discovery(monkeypatch):
+    import httpx
+
+    fake_response = Mock()
+    fake_response.raise_for_status = Mock()
+    fake_response.json = Mock(return_value={
+        "models": [
+            {
+                "name": "models/gemini-3.8-flash",
+                "displayName": "Gemini 3.8 Flash",
+                "supportedGenerationMethods": ["generateContent", "countTokens"],
+            },
+            {
+                "name": "models/gemini-3.1-pro",
+                "displayName": "Gemini 3.1 Pro",
+                "supportedGenerationMethods": ["generateContent"],
+            },
+            {
+                "name": "models/gemini-embedding-001",
+                "displayName": "Gemini Embedding",
+                "supportedGenerationMethods": ["embedContent"],
+            },
+            {
+                "name": "models/gemini-no-methods",
+                "displayName": "Gemini No Methods",
+            },
+            {
+                "name": "models/imagen-3.0",
+                "displayName": "Imagen 3",
+                "supportedGenerationMethods": ["generateImages"],
+            },
+        ]
+    })
+    mock_get = Mock(return_value=fake_response)
+    monkeypatch.setattr(httpx, "get", mock_get)
+
+    result = api.list_llm_models(tier="deep", provider="google", api_key="test-api-key")
+
+    assert result["source"] == "endpoint"
+    assert result["models"] == [
+        {"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash"},
+        {"id": "gemini-3.1-pro", "label": "Gemini 3.1 Pro"},
+        {"id": "gemini-no-methods", "label": "Gemini No Methods"},
+        {"id": "custom", "label": "Custom model ID"},
+    ]
+    mock_get.assert_called_once_with(
+        "https://generativelanguage.googleapis.com/v1beta/models",
+        headers={"x-goog-api-key": "test-api-key"},
+        timeout=5.0,
+    )
+
+
+def test_list_llm_models_google_custom_base_url(monkeypatch):
+    import httpx
+
+    fake_response = Mock()
+    fake_response.raise_for_status = Mock()
+    fake_response.json = Mock(return_value={
+        "models": [
+            {"name": "models/gemini-3.8-flash", "displayName": "Gemini 3.8 Flash"},
+        ]
+    })
+    mock_get = Mock(return_value=fake_response)
+    monkeypatch.setattr(httpx, "get", mock_get)
+
+    result = api.list_llm_models(
+        tier="quick",
+        provider="google",
+        base_url="https://proxy.example.com",
+        api_key="test-key",
+    )
+    assert result["source"] == "endpoint"
+    assert result["models"] == [
+        {"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash"},
+        {"id": "custom", "label": "Custom model ID"},
+    ]
+    mock_get.assert_called_once_with(
+        "https://proxy.example.com/v1beta/models",
+        headers={"x-goog-api-key": "test-key"},
+        timeout=5.0,
+    )
+
+
+def test_list_llm_models_google_fallback_missing_key(monkeypatch):
+    import httpx
+
+    mock_get = Mock()
+    monkeypatch.setattr(httpx, "get", mock_get)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    api.update_llm_config(api.LLMConfigUpdateRequest(
+        provider="google", api_key="",
+        deep_provider="google", deep_api_key="",
+    ))
+
+    result = api.list_llm_models(tier="deep", provider="google", api_key="")
+    assert result["source"] == "catalog"
+    mock_get.assert_not_called()
+    assert any(m["id"] == "gemini-3.8-flash" for m in result["models"])
+    assert result["models"][-1] == {"id": "custom", "label": "Custom model ID"}
+
+
+def test_list_llm_models_google_fallback_on_error(monkeypatch):
+    import httpx
+
+    mock_get = Mock(side_effect=httpx.ConnectError("Connection refused"))
+    monkeypatch.setattr(httpx, "get", mock_get)
+
+    result = api.list_llm_models(tier="deep", provider="google", api_key="some-key")
+    assert result["source"] == "catalog"
+    mock_get.assert_called_once()
+    assert any(m["id"] == "gemini-3.8-flash" for m in result["models"])
+    assert result["models"][-1] == {"id": "custom", "label": "Custom model ID"}
+
+
+def test_list_llm_models_tier_with_own_provider_does_not_inherit_shared_base_url(monkeypatch):
+    import httpx
+
+    mock_get = Mock()
+    monkeypatch.setattr(httpx, "get", mock_get)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    api.update_llm_config(api.LLMConfigUpdateRequest(
+        provider="openai_compatible",
+        base_url="http://192.168.1.37:8000/v1",
+        api_key="",
+        deep_provider="google",
+        deep_base_url="",
+        deep_api_key="",
+    ))
+
+    result = api.list_llm_models(tier="deep")
+    assert result["source"] == "catalog"
+    assert any(m["id"] == "gemini-3.8-flash" for m in result["models"])
+    mock_get.assert_not_called()
+
+    fake_response = Mock()
+    fake_response.raise_for_status = Mock()
+    fake_response.json = Mock(return_value={"models": [{"name": "models/gemini-3.8-flash", "displayName": "Gemini 3.8 Flash"}]})
+    mock_get.return_value = fake_response
+
+    result_with_key = api.list_llm_models(tier="deep", api_key="my-google-key")
+    assert result_with_key["source"] == "endpoint"
+    mock_get.assert_called_once_with(
+        "https://generativelanguage.googleapis.com/v1beta/models",
+        headers={"x-goog-api-key": "my-google-key"},
+        timeout=5.0,
+    )
+    for call in mock_get.call_args_list:
+        assert "192.168.1.37" not in str(call)
+
+
+def test_list_llm_models_omitted_tier_provider_inherits_shared_base_url(monkeypatch):
+    import httpx
+
+    fake_response = Mock()
+    fake_response.raise_for_status = Mock()
+    fake_response.json = Mock(return_value={"data": [{"id": "local-model-1"}]})
+    mock_get = Mock(return_value=fake_response)
+    monkeypatch.setattr(httpx, "get", mock_get)
+
+    api.update_llm_config(api.LLMConfigUpdateRequest(
+        provider="openai_compatible",
+        base_url="http://192.168.1.37:8000/v1",
+        api_key="shared-secret",
+        deep_provider="",
+        deep_base_url="",
+        deep_api_key="",
+    ))
+
+    result = api.list_llm_models(tier="deep")
+    assert result["source"] == "endpoint"
+    assert any(m["id"] == "local-model-1" for m in result["models"])
+    mock_get.assert_called_once_with(
+        "http://192.168.1.37:8000/v1/models",
+        headers={"Authorization": "Bearer shared-secret"},
+        timeout=5.0,
+    )
+
+
+def test_test_llm_config_tier_with_own_provider_does_not_inherit_shared_base_url(monkeypatch):
+    api.update_llm_config(api.LLMConfigUpdateRequest(
+        provider="openai_compatible",
+        base_url="http://192.168.1.37:8000/v1",
+        api_key="shared-secret",
+        deep_provider="google",
+        deep_base_url="",
+        deep_api_key="google-secret",
+        deep_model="gemini-3.8-flash",
+    ))
+    connection = Mock(return_value="Connected")
+    monkeypatch.setattr(llm_settings, "test_connection", connection)
+
+    api.test_llm_config(api.LLMTestRequest(tier="deep"))
+    connection.assert_called_once_with(
+        provider="google",
+        api_key="google-secret",
+        base_url="",
+        model="gemini-3.8-flash",
+    )
+
+
+def test_index_html_served_cache_buster_v5():
+    from fastapi.testclient import TestClient
+    from webapp.app import create_app
+
+    client = TestClient(create_app())
+    response = client.get("/")
+    assert response.status_code == 200
+    assert ("app.js?v=20260922_v5" in response.text or "app.js?v=20260922_v4" in response.text)
+
+

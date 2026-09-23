@@ -913,17 +913,11 @@ function renderRuns() {
       const isActionReview = actionUpper === 'REVIEW';
       const isReview = isActionReview || (!actionUpper && ratingUpper === 'REVIEW');
       const isHold = isActionHold || (!actionUpper && (ratingUpper === 'HOLD' || ratingUpper === 'NEUTRAL'));
-      const isConflict = (isActionHold || isActionReview) && ['BUY', 'OVERWEIGHT', 'SELL', 'UNDERWEIGHT'].includes(ratingUpper);
       const isNonActionable = isReview || isHold || isAvoidEntry(rec);
       const isZh = (state.settings?.lang === 'zh') || (getStoredLang() === 'zh');
-      const conflictHint = isZh
-        ? `⚠️ 冲突：Trader 决策为 ${actionUpper}，优先于 PM Rating (${escapeHtml(rec.rating || ratingUpper)}) — 以 Trader 为准，未下单（无持仓，避免入场）`
-        : `⚠️ Conflict: Trader Action=${actionUpper} takes precedence over PM Rating (${escapeHtml(rec.rating || ratingUpper)}) — no order placed (avoid entry)`;
-      const reviewHint = isConflict
-        ? `<span class="text-warning text-xs">${conflictHint}</span>`
-        : (isReview
-          ? (isZh ? '<span class="text-muted text-xs">需人工审核（不可执行）</span>' : '<span class="text-muted text-xs">Requires manual review (non-actionable)</span>')
-          : (isZh ? '<span class="text-muted text-xs">HOLD — 不会下单</span>' : '<span class="text-muted text-xs">HOLD — no order will be placed</span>'));
+      const reviewHint = isReview
+        ? (isZh ? '<span class="text-muted text-xs">需人工审核（不可执行）</span>' : '<span class="text-muted text-xs">Requires manual review (non-actionable)</span>')
+        : (isZh ? '<span class="text-muted text-xs">HOLD — 不会下单</span>' : '<span class="text-muted text-xs">HOLD — no order will be placed</span>');
       const whyBtnLabel = isZh ? '💬 为什么？' : '💬 Why?';
       const orderSideUpper = (order && order.side) ? order.side.trim().toUpperCase() : '';
 
@@ -1694,7 +1688,6 @@ async function updateModalData() {
         const isActionReview = actionUpper === 'REVIEW';
         const isReview = isActionReview || (!actionUpper && ratingUpper === 'REVIEW');
         const isHold = isActionHold || (!actionUpper && (ratingUpper === 'HOLD' || ratingUpper === 'NEUTRAL'));
-        const isConflict = (isActionHold || isActionReview) && ['BUY', 'OVERWEIGHT', 'SELL', 'UNDERWEIGHT'].includes(ratingUpper);
         const isNonActionable = isReview || isHold || isAvoidEntry(rec);
         const isZh = (state.settings?.lang === 'zh') || (getStoredLang() === 'zh');
 
@@ -1720,11 +1713,7 @@ async function updateModalData() {
             reviewHintEl.classList.add('hidden');
           } else {
             reviewHintEl.classList.remove('hidden');
-            if (isConflict) {
-              reviewHintEl.innerHTML = isZh
-                ? `<span class="text-warning">⚠️ 冲突：Trader Action=${actionUpper} 优先于 PM Rating (${escapeHtml(rec.rating || ratingUpper)}) — 以 Trader 为准，未下单</span>`
-                : `<span class="text-warning">⚠️ Conflict: Trader Action=${actionUpper} takes precedence over PM Rating (${escapeHtml(rec.rating || ratingUpper)}) — no order placed</span>`;
-            } else if (isReview) {
+            if (isReview) {
               reviewHintEl.textContent = isZh ? '需人工审核（不可执行）' : 'Requires manual review (non-actionable)';
             } else {
               reviewHintEl.textContent = isZh ? 'HOLD — 不会下单' : 'HOLD — no order will be placed';
@@ -2149,7 +2138,14 @@ function setLlmFormValues(cfg) {
     select.replaceChildren(new Option('Default provider', ''));
     for (const provider of cfg.providers || []) select.add(new Option(provider, provider));
     select.value = cfg[`${tier}_provider`] || cfg.provider || '';
-    document.getElementById(`llm-${tier}-base-url`).value = cfg[`${tier}_base_url`] || cfg.base_url || '';
+    const tierProvider = (cfg[`${tier}_provider`] || '').trim();
+    // A tier only inherits the shared base_url when it has NO provider of its own.
+    // A tier on its own provider (e.g. google) with a blank base_url stays blank so
+    // native providers use their default endpoint instead of borrowing another's.
+    const baseUrlValue = tierProvider
+      ? (cfg[`${tier}_base_url`] || '')
+      : (cfg[`${tier}_base_url`] || cfg.base_url || '');
+    document.getElementById(`llm-${tier}-base-url`).value = baseUrlValue;
     document.getElementById(`llm-${tier}-model`).value = cfg[`${tier}_model`] || '';
     const key = document.getElementById(`llm-${tier}-api-key`);
     key.value = '';
@@ -2160,7 +2156,7 @@ function setLlmFormValues(cfg) {
   }
 }
 
-async function refreshTierModels(tier) {
+async function refreshTierModels(tier, providerChanged = false) {
   const button = document.getElementById(`btn-refresh-${tier}`);
   const status = document.getElementById(`llm-${tier}-models-status`);
   const list = document.getElementById(`llm-${tier}-models`);
@@ -2183,9 +2179,31 @@ async function refreshTierModels(tier) {
       params.set('catalog_only', 'true');
       response = await api(`/api/llm-config/models?${params}`);
     }
+    let catalog = response;
+    if (providerChanged && response.source === 'endpoint') {
+      try {
+        params.set('catalog_only', 'true');
+        catalog = await api(`/api/llm-config/models?${params}`);
+      } catch (err) {
+        catalog = response;
+      }
+    }
     if (list.dataset.requestId !== requestId) return;
     list.replaceChildren(...response.models.map(model => new Option(model.label, model.id)));
     status.textContent = response.source === 'endpoint' ? 'Candidates from endpoint' : 'Using catalog candidates; custom IDs are welcome';
+    if (providerChanged) {
+      const modelInput = document.getElementById(`llm-${tier}-model`);
+      const currentModel = modelInput.value.trim();
+      const candidates = [...response.models, ...catalog.models];
+      const defaultModel = catalog.models.find(model => model.id && model.id !== 'custom') || response.models.find(model => model.id && model.id !== 'custom');
+      if (defaultModel && (!currentModel || !candidates.some(model => model.id !== 'custom' && model.id === currentModel))) {
+        modelInput.value = defaultModel.id;
+        const provider = document.getElementById(`llm-${tier}-provider`);
+        const rawLabel = provider.selectedOptions && provider.selectedOptions[0] ? provider.selectedOptions[0].textContent : provider.value;
+        const providerLabel = provider.value === 'google' ? 'Google' : rawLabel;
+        status.textContent = `Model auto-set to ${defaultModel.id} for ${providerLabel}`;
+      }
+    }
   } catch (err) {
     if (list.dataset.requestId === requestId) status.textContent = 'Candidates unavailable. Enter a model ID manually.';
   } finally {
@@ -2511,12 +2529,14 @@ document.addEventListener('DOMContentLoaded', () => {
   for (const tier of ['deep', 'quick']) {
     document.getElementById(`btn-refresh-${tier}`).addEventListener('click', () => refreshTierModels(tier));
     let refreshTimer;
-    for (const field of ['provider', 'base-url']) {
-      document.getElementById(`llm-${tier}-${field}`).addEventListener('input', () => {
-        clearTimeout(refreshTimer);
-        refreshTimer = setTimeout(() => refreshTierModels(tier), 400);
-      });
-    }
+    document.getElementById(`llm-${tier}-provider`).addEventListener('change', () => {
+      clearTimeout(refreshTimer);
+      refreshTierModels(tier, true);
+    });
+    document.getElementById(`llm-${tier}-base-url`).addEventListener('input', () => {
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => refreshTierModels(tier), 400);
+    });
     document.getElementById(`btn-test-${tier}`).addEventListener('click', () => testTierConnection(tier));
     document.getElementById(`btn-clear-${tier}-api-key`).addEventListener('click', () => {
       const key = document.getElementById(`llm-${tier}-api-key`);

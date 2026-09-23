@@ -7,17 +7,21 @@ from typing import Any, Callable
 
 
 
-def _extract_first_sentences(text: Any, max_sentences: int = 2, max_chars: int = 200) -> str:
+def _extract_first_sentences(
+    text: Any,
+    max_sentences: int | None = None,
+    max_chars: int | None = None,
+) -> str:
     """Extract clean, non-technical plain sentences from markdown or structured string."""
     if not text:
         return ""
     if not isinstance(text, str):
         if isinstance(text, dict):
-            # Try to grab common summary/message fields
+            # Try to grab common summary/message fields (prefer executive_summary if present)
             for k in (
+                "executive_summary",
                 "content",
                 "reasoning",
-                "executive_summary",
                 "investment_thesis",
                 "summary",
                 "plan",
@@ -37,8 +41,21 @@ def _extract_first_sentences(text: Any, max_sentences: int = 2, max_chars: int =
     if "structured output returned nothing" in text:
         return ""
 
+    # If text contains an explicit Executive Summary section, extract that meaningful section
+    exec_match = re.search(
+        r"(?:\*\*|\b)Executive Summary(?:\*\*|\b)?:\s*(.*?)(?=\n\s*(?:\*\*|#|\Z))",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if exec_match:
+        exec_text = exec_match.group(1).strip()
+        if exec_text:
+            text = exec_text
+
     # Strip markdown horizontal rules (---, ___, ***)
     cleaned = re.sub(r"^\s*[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
+    # Strip markdown table rows and separators (| col | col | or |---|---|)
+    cleaned = re.sub(r"^\s*\|.*\|\s*$", "", cleaned, flags=re.MULTILINE)
     # Strip entire heading lines (# Title) if remaining body text exists; otherwise strip hashes
     heading_stripped = re.sub(r"^#+\s*.*$", "", cleaned, flags=re.MULTILINE).strip()
     if heading_stripped:
@@ -56,32 +73,40 @@ def _extract_first_sentences(text: Any, max_sentences: int = 2, max_chars: int =
         line_s = line.strip()
         if not line_s:
             continue
-        if ("analysis date:" in line_s.lower() or "as of " in line_s.lower()) and (
-            "|" in line_s or line_s.endswith("close")
+        if (
+            any(k in line_s.lower() for k in ("analysis date:", "as of ", "分析日期", "最新交易日", "最新收盘价"))
+            and ("|" in line_s or line_s.endswith("close") or "：" in line_s or ":" in line_s)
         ):
             continue
         lines.append(line_s)
     cleaned = " ".join(lines)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
-    # Split into sentences
-    sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+    if max_sentences is None and max_chars is None:
+        return cleaned
+
+    # Split into sentences (handles both Western [.!?] and CJK [。！？])
+    sentences = re.split(r"(?<=[。！？])\s*|(?<=[.!?])(?!\d)\s+", cleaned)
     selected = []
     total_len = 0
     for s in sentences:
         s_clean = s.strip()
-        if not s_clean or len(s_clean) < 8:
+        if not s_clean:
+            continue
+        if len(s_clean) < 8 and len(sentences) > 1:
             continue
         # Skip section titles like "Executive Summary:"
         if s_clean.endswith(":") and len(s_clean.split()) <= 4:
             continue
         selected.append(s_clean)
         total_len += len(s_clean)
-        if len(selected) >= max_sentences or total_len >= max_chars:
+        if (max_sentences is not None and len(selected) >= max_sentences) or (
+            max_chars is not None and total_len >= max_chars
+        ):
             break
 
     result = " ".join(selected)
-    if len(result) > max_chars:
+    if max_chars is not None and len(result) > max_chars:
         result = result[:max_chars].rstrip() + "..."
     return result
 
@@ -170,18 +195,18 @@ def _extract_analyst_key_find(calls: list[dict[str, Any]]) -> str:
                     score_str = ""
                 snippets.append(f"Sentiment: {band}{score_str}")
             elif resp.get("content"):
-                first = _extract_first_sentences(resp.get("content"), max_sentences=1, max_chars=90)
+                first = _extract_first_sentences(resp.get("content"))
                 if first:
                     snippets.append(first)
         elif isinstance(resp, str):
-            first = _extract_first_sentences(resp, max_sentences=1, max_chars=90)
+            first = _extract_first_sentences(resp)
             if first:
                 snippets.append(first)
 
     # Check for market analyst report
     market_call = _select_representative_call(calls, lambda c: "Market" in (c.get("node") or ""))
     if market_call:
-        first = _extract_first_sentences(market_call.get("response"), max_sentences=1, max_chars=110)
+        first = _extract_first_sentences(market_call.get("response"))
         if first and "Select indicators" not in first and "tool" not in first.lower():
             snippets.append(first)
 
@@ -189,7 +214,7 @@ def _extract_analyst_key_find(calls: list[dict[str, Any]]) -> str:
     if len(snippets) < 2:
         fund_call = _select_representative_call(calls, lambda c: "Fundamentals" in (c.get("node") or ""))
         if fund_call:
-            first = _extract_first_sentences(fund_call.get("response"), max_sentences=1, max_chars=100)
+            first = _extract_first_sentences(fund_call.get("response"))
             if first and "tool" not in first.lower():
                 snippets.append(first)
 
@@ -472,16 +497,16 @@ def summarize_run(
     rm_call = _select_representative_call(s2_calls, lambda c: "Research Manager" in (c.get("node") or c.get("agent") or ""))
     rm_quote = ""
     if rm_call:
-        rm_quote = _extract_first_sentences(rm_call.get("response"), max_sentences=2, max_chars=180)
+        rm_quote = _extract_first_sentences(rm_call.get("response"))
 
     if not rm_quote and rec.get("trader_investment_plan"):
-        rm_quote = _extract_first_sentences(rec.get("trader_investment_plan"), max_sentences=2, max_chars=180)
+        rm_quote = _extract_first_sentences(rec.get("trader_investment_plan"))
 
     s2_active_quote = rm_quote
     if not s2_active_quote and s2_calls:
         any_s2_call = _select_representative_call(s2_calls, lambda c: True)
         if any_s2_call:
-            s2_active_quote = _extract_first_sentences(any_s2_call.get("response"), max_sentences=2, max_chars=180)
+            s2_active_quote = _extract_first_sentences(any_s2_call.get("response"))
 
     if is_running:
         st2 = step_states.get(2, "pending")
@@ -499,14 +524,14 @@ def summarize_run(
     # Step 3 Key Finding & What
     clean_reason = ""
     if rec.get("reasoning"):
-        clean_reason = _extract_first_sentences(rec.get("reasoning"), max_sentences=1, max_chars=120)
+        clean_reason = _extract_first_sentences(rec.get("reasoning"))
     else:
         trader_call = _select_representative_call(s3_calls, lambda c: "Trader" in (c.get("node") or c.get("agent") or ""))
         if trader_call:
-            clean_reason = _extract_first_sentences(trader_call.get("response"), max_sentences=1, max_chars=120)
+            clean_reason = _extract_first_sentences(trader_call.get("response"))
 
     trader_call = _select_representative_call(s3_calls, lambda c: "Trader" in (c.get("node") or c.get("agent") or ""))
-    trader_resp = _extract_first_sentences(trader_call.get("response"), max_sentences=2, max_chars=160) if trader_call else ""
+    trader_resp = _extract_first_sentences(trader_call.get("response")) if trader_call else ""
 
     real_s3 = ""
     if action in ("BUY", "SELL"):
@@ -553,29 +578,33 @@ def summarize_run(
     pm_call = _select_representative_call(s4_calls, lambda c: "Portfolio Manager" in (c.get("node") or c.get("agent") or ""))
     pm_quote = ""
     if pm_call:
-        pm_quote = _extract_first_sentences(pm_call.get("response"), max_sentences=2, max_chars=180)
+        pm_quote = _extract_first_sentences(pm_call.get("response"))
 
     if not pm_quote and rec.get("final_trade_decision"):
-        pm_quote = _extract_first_sentences(rec.get("final_trade_decision"), max_sentences=2, max_chars=180)
+        pm_quote = _extract_first_sentences(rec.get("final_trade_decision"))
 
     s4_active_quote = pm_quote
     if not s4_active_quote and s4_calls:
         any_s4 = _select_representative_call(s4_calls, lambda c: True)
         if any_s4:
-            s4_active_quote = _extract_first_sentences(any_s4.get("response"), max_sentences=2, max_chars=180)
+            s4_active_quote = _extract_first_sentences(any_s4.get("response"))
 
     if is_running:
         st4 = step_states.get(4, "pending")
         if st4 == "done":
             if pm_quote:
-                s4_key_find = f"PM decision: {rating} / {action} — {pm_quote}" if action else pm_quote
+                clean_pm = re.sub(r"^Rating:\s*[\w/ -]+[—–-]?\s*", "", pm_quote, flags=re.IGNORECASE).strip()
+                pm_display = clean_pm if clean_pm else pm_quote
+                s4_key_find = f"PM decision: {rating} / {action} — {pm_display}" if action else pm_display
             elif s4_active_quote:
                 s4_key_find = s4_active_quote
             else:
                 s4_key_find = "Completed"
         elif st4 == "active":
             if pm_quote:
-                s4_key_find = f"PM decision: {rating} / {action} — {pm_quote}" if action else pm_quote
+                clean_pm = re.sub(r"^Rating:\s*[\w/ -]+[—–-]?\s*", "", pm_quote, flags=re.IGNORECASE).strip()
+                pm_display = clean_pm if clean_pm else pm_quote
+                s4_key_find = f"PM decision: {rating} / {action} — {pm_display}" if action else pm_display
             elif s4_active_quote:
                 s4_key_find = s4_active_quote
             else:
@@ -585,7 +614,11 @@ def summarize_run(
     else:
         if not pm_quote:
             pm_quote = f"Portfolio Manager finalized verdict: {rating} / {action or 'HOLD'}."
-        s4_key_find = f"PM decision: {rating} / {action or 'HOLD'} — {pm_quote}"
+            s4_key_find = f"PM decision: {rating} / {action or 'HOLD'} — {pm_quote}"
+        else:
+            clean_pm = re.sub(r"^Rating:\s*[\w/ -]+[—–-]?\s*", "", pm_quote, flags=re.IGNORECASE).strip()
+            pm_display = clean_pm if clean_pm else pm_quote
+            s4_key_find = f"PM decision: {rating} / {action or 'HOLD'} — {pm_display}"
 
     # Step 5 Execution / Advisory
     ord_status = (ord_info.get("status") or "").lower() if ord_info else ""

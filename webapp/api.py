@@ -378,6 +378,24 @@ def update_llm_config(req: LLMConfigUpdateRequest) -> dict[str, Any]:
     return get_llm_config()
 
 
+def _resolve_tier_base_url(saved: dict[str, Any], tier: str, base_url: str | None = None) -> str:
+    """Resolve base_url for a tier respecting provider scoping.
+
+    A tier only inherits the shared base_url when it has no provider of its own.
+    A tier on its own provider with a blank base_url returns "" so native providers
+    use their default endpoint instead of borrowing a different provider URL.
+    """
+    if base_url is not None:
+        return base_url.strip()
+    tier_base = (saved.get(f"{tier}_base_url") or "").strip()
+    tier_provider_set = bool(str(saved.get(f"{tier}_provider", "") or "").strip())
+    if tier_base:
+        return tier_base
+    if not tier_provider_set:
+        return (saved.get("base_url") or "").strip()
+    return ""
+
+
 @router.get("/llm-config/models")
 def list_llm_models(tier: Literal["deep", "quick"], provider: str | None = None,
                     base_url: str | None = None, api_key: str | None = None,
@@ -390,20 +408,55 @@ def list_llm_models(tier: Literal["deep", "quick"], provider: str | None = None,
     saved = llm_settings.get_llm_config()
     saved_provider = saved[f"{tier}_provider"] or saved["provider"]
     provider = (provider or saved_provider).strip().lower()
-    base_url = (base_url if base_url is not None else saved[f"{tier}_base_url"] or saved["base_url"]).strip()
+    base_url = _resolve_tier_base_url(saved, tier, base_url)
     if api_key is None:
         api_key = (saved[f"{tier}_api_key"] or saved["api_key"]) if provider == saved_provider else ""
         env_name = llm_settings.PROVIDER_KEY_ENV.get(provider)
         api_key = api_key or (os.environ.get(env_name, "") if env_name else "")
     models = []
     source = ""
+    key = (api_key or "").strip()
+    if not catalog_only and provider == "google" and key:
+        if base_url:
+            b = base_url.rstrip("/")
+            if b.endswith("/v1beta/models"):
+                url = b
+            elif b.endswith("/v1beta"):
+                url = f"{b}/models"
+            else:
+                url = f"{b}/v1beta/models"
+        else:
+            url = "https://generativelanguage.googleapis.com/v1beta/models"
+        headers = {"x-goog-api-key": key}
+        try:
+            response = httpx.get(url, headers=headers, timeout=5.0)
+            response.raise_for_status()
+            items = response.json().get("models", [])
+            for item in items:
+                name = item.get("name")
+                if not isinstance(name, str) or not name.startswith("models/gemini-"):
+                    continue
+                methods = item.get("supportedGenerationMethods")
+                if methods is not None and isinstance(methods, (list, tuple, set)) and "generateContent" not in methods:
+                    continue
+                model_id = name.removeprefix("models/")
+                if not model_id or model_id == "custom":
+                    continue
+                display_name = item.get("displayName")
+                label = display_name if isinstance(display_name, str) and display_name.strip() else model_id
+                if not any(m["id"] == model_id for m in models):
+                    models.append({"id": model_id, "label": label})
+            if models:
+                source = "endpoint"
+        except Exception:
+            models = []
     compatible = set(llm_settings.LLM_PROVIDERS) - {"google", "anthropic", "bedrock"}
-    if not catalog_only and base_url and provider in compatible:
+    if not models and not catalog_only and base_url and provider in compatible:
         url = base_url.rstrip("/")
         url = url.removesuffix("/v1") + "/api/tags" if provider == "ollama" else url + "/models"
-        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        if provider == "azure" and api_key:
-            headers.update({"api-key": api_key, "x-api-key": api_key})
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        if provider == "azure" and key:
+            headers.update({"api-key": key, "x-api-key": key})
         try:
             response = httpx.get(url, headers=headers, timeout=5.0)
             response.raise_for_status()
@@ -452,7 +505,7 @@ def test_llm_config(req: LLMTestRequest) -> dict[str, Any]:
             if api_key is None and provider == saved_provider:
                 api_key = ("" if req.inherit_api_key else saved[f"{tier}_api_key"]) or saved["api_key"]
             if base_url is None:
-                base_url = saved[f"{tier}_base_url"] or saved["base_url"]
+                base_url = _resolve_tier_base_url(saved, tier, None)
             if model is None:
                 model = saved[f"{tier}_model"]
         else:
@@ -681,8 +734,9 @@ def ask_run_question(run_id: str, req: AskRunQuestionRequest) -> dict[str, Any]:
         "Use the provided run context (agent findings, recommendation, order status, debate timeline) "
         "to answer the user's question accurately, concisely, and insightfully.\n"
         "Explain the reasoning of different agents (e.g., Trader vs Portfolio Manager, Analysts, Risk Manager) if relevant.\n"
-        "If there is a conflict (such as Trader Action=HOLD vs Portfolio Manager Rating=Overweight), clarify that "
-        "Trader's explicit action is authoritative to avoid entry when there is no existing position.\n"
+        "Rating and Action are independent: the Rating expresses the investment view (bullish/bearish) while the "
+        "Action reflects what to trade given the caller's current position. For example, a bearish Rating (Underweight/Sell) "
+        "paired with Action=Hold simply means 'bearish view but no position to sell' — this is consistent, not a conflict.\n"
         "Always respond in the same language as the user's question (e.g., Chinese if asked in Chinese, English if asked in English).\n\n"
         f"Context for this run:\n{context}"
     )
